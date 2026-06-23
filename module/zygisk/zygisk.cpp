@@ -77,6 +77,71 @@
 #include <sys/syscall.h>
 #include <dirent.h>
 #include <link.h>
+#include <fstream>
+
+// ============================================================
+// 配置读取 —— 支持 config.json
+// ============================================================
+#define CONFIG_PATH "/data/adb/modules/MomoRedAll-Native/config.json"
+
+static bool config_loaded = false;
+static bool config_enabled[12] = {true};
+static bool config_hooks[13] = {true};
+
+static void load_config() {
+    if (config_loaded) return;
+    config_loaded = true;
+
+    std::ifstream f(CONFIG_PATH);
+    if (!f.is_open()) {
+        for (int i = 0; i < 12; i++) config_enabled[i] = true;
+        for (int i = 0; i < 13; i++) config_hooks[i] = true;
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+
+    const char* target_keys[] = {
+        "momo", "native_test", "applist_detector", "ruru", "detect_magisk_hide",
+        "momo_strong", "safetynet", "safetynet_playstore", "cat_and_mouse",
+        "android_cts", "rootbeer", "rootbeer_fresh"
+    };
+    for (int i = 0; i < 12; i++) {
+        std::string key = "\"" + std::string(target_keys[i]) + "\":";
+        size_t pos = content.find(key);
+        if (pos != std::string::npos) {
+            pos = content.find(":", pos + key.length());
+            if (pos != std::string::npos) {
+                config_enabled[i] = (content.find("true", pos) < content.find("false", pos) ||
+                                     content.find("false", pos) == std::string::npos);
+            }
+        }
+    }
+
+    const char* hook_keys[] = {
+        "fopen", "open", "stat", "access", "opendir",
+        "popen_system", "readlink", "ptrace", "getenv",
+        "property", "proc", "mounts", "extra"
+    };
+    for (int i = 0; i < 13; i++) {
+        std::string key = "\"" + std::string(hook_keys[i]) + "\":";
+        size_t pos = content.find(key);
+        if (pos != std::string::npos) {
+            pos = content.find(":", pos + key.length());
+            if (pos != std::string::npos) {
+                config_hooks[i] = (content.find("true", pos) < content.find("false", pos) ||
+                                   content.find("false", pos) == std::string::npos);
+            }
+        }
+    }
+}
+
+static bool is_hook_enabled(int hook_index) {
+    load_config();
+    if (hook_index < 0 || hook_index >= 13) return true;
+    return config_hooks[hook_index];
+}
 
 // ============================================================
 // 目标进程包名列表（全面覆盖各检测器）
@@ -160,6 +225,13 @@ static const char* BLOCKED_PATH_KEYWORDS[] = {
     // === 自定义ROM 线索 ===
     "lineage", "LineageOS", "rr_", "aicp_",
     "pixel.experience", "crdroid",
+    // === 新增路径关键词 ===
+    "sulinux", "daemonsu", "phh.superuser",
+    "/system/app/SuperSU", "/system/app/Superuser",
+    "/data/local/tmp/su",
+    "/system/etc/init/magisk",
+    "/system/lib/libsupol.so",
+    "/system/lib64/libsupol.so",
     nullptr
 };
 
@@ -188,6 +260,12 @@ static const char* BLOCKED_SHELL_KEYWORDS[] = {
     "ls -la /data/adb",
     "getenforce", "sestatus",
     "seinfo", "sesearch",
+    // === 新增 Shell 关键词 ===
+    "uname", "dmesg", "logcat",
+    "iptables", "nft", "ip",
+    "chcon", "restorecon",
+    "load_policy", "setenforce",
+    "screencap", "screenrecord",
     nullptr
 };
 
@@ -242,6 +320,27 @@ static const char* BLOCKED_PROPERTIES[] = {
     "ro.ota.", "ro.build.fingerprint",
     // === Frida ===
     "persist.frida", "frida.server",
+    // === 新增：更多构建/Rom 检测属性 ===
+    "ro.build.version.codename",
+    "ro.build.version.release",
+    "ro.build.version.incremental",
+    "ro.build.version.sdk",
+    "ro.build.characteristics",
+    // === 新增：init.rc 服务检测 ===
+    "init.svc.surfaceflinger",
+    "init.svc.zygote",
+    "init.svc.media",
+    // === 新增：更多 ROM 特征 ===
+    "ro.havoc.version",
+    "ro.evolution.version",
+    "ro.resurrection.version",
+    // === 新增：更多隐藏属性 ===
+    "ro.vendor.build.fingerprint",
+    "ro.odm.build.fingerprint",
+    "ro.system.build.fingerprint",
+    // === 新增：SELinux 补充 ===
+    "ro.build.selinux.enforce",
+    "persist.sys.safemode",
     nullptr
 };
 
@@ -290,7 +389,7 @@ static bool path_contains_keyword(const char* path) {
 }
 
 static bool path_is_proc_self(const char* path) {
-    if (!path || !is_target) return false;
+    if (!path || !is_target || !is_hook_enabled(10)) return false;
     const char* candidates[] = {
         "/proc/self/", "/proc/self/status",
         "/proc/self/mounts", "/proc/self/maps",
@@ -313,7 +412,7 @@ static bool path_is_proc_self(const char* path) {
 }
 
 static bool path_is_proc_mounts(const char* path) {
-    if (!path || !is_target) return false;
+    if (!path || !is_target || !is_hook_enabled(11)) return false;
     return strcmp(path, "/proc/mounts") == 0 ||
            strcmp(path, "/proc/1/mounts") == 0;
 }
@@ -352,6 +451,7 @@ static bool detect_target_process() {
 // ============================================================
 static FILE* hook_fopen(const char* path, const char* mode) {
     if (is_target) {
+        if (!is_hook_enabled(0)) return orig_fopen(path, mode);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             return nullptr;
         }
@@ -364,6 +464,11 @@ static FILE* hook_fopen(const char* path, const char* mode) {
 // ============================================================
 static int hook_open(const char* path, int flags, ...) {
     if (is_target) {
+        if (!is_hook_enabled(1)) {
+            va_list args; va_start(args, flags);
+            unsigned int mode = va_arg(args, unsigned int); va_end(args);
+            return orig_open(path, flags, (mode_t)mode);
+        }
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -379,6 +484,11 @@ static int hook_open(const char* path, int flags, ...) {
 
 static int hook_open64(const char* path, int flags, ...) {
     if (is_target) {
+        if (!is_hook_enabled(1)) {
+            va_list args; va_start(args, flags);
+            unsigned int mode = va_arg(args, unsigned int); va_end(args);
+            return orig_open64(path, flags, (mode_t)mode);
+        }
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -393,6 +503,7 @@ static int hook_open64(const char* path, int flags, ...) {
 
 static int hook___open_2(const char* path, int flags) {
     if (is_target) {
+        if (!is_hook_enabled(1)) return orig___open_2(path, flags);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -406,6 +517,7 @@ static int hook___open_2(const char* path, int flags) {
 // ============================================================
 static int hook_stat(const char* path, struct stat* buf) {
     if (is_target) {
+        if (!is_hook_enabled(2)) return orig_stat(path, buf);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -416,6 +528,7 @@ static int hook_stat(const char* path, struct stat* buf) {
 
 static int hook_lstat(const char* path, struct stat* buf) {
     if (is_target) {
+        if (!is_hook_enabled(2)) return orig_lstat(path, buf);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -426,6 +539,7 @@ static int hook_lstat(const char* path, struct stat* buf) {
 
 static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags) {
     if (is_target) {
+        if (!is_hook_enabled(2)) return orig_fstatat(dirfd, path, buf, flags);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -436,6 +550,7 @@ static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags
 
 static int hook___lxstat(int ver, const char* path, struct stat* buf) {
     if (is_target) {
+        if (!is_hook_enabled(2)) return orig___lxstat(ver, path, buf);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -446,6 +561,7 @@ static int hook___lxstat(int ver, const char* path, struct stat* buf) {
 
 static int hook___xstat(int ver, const char* path, struct stat* buf) {
     if (is_target) {
+        if (!is_hook_enabled(2)) return orig___xstat(ver, path, buf);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -459,6 +575,7 @@ static int hook___xstat(int ver, const char* path, struct stat* buf) {
 // ============================================================
 static int hook_access(const char* path, int mode) {
     if (is_target) {
+        if (!is_hook_enabled(3)) return orig_access(path, mode);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -469,6 +586,7 @@ static int hook_access(const char* path, int mode) {
 
 static int hook_faccessat(int dirfd, const char* path, int mode, int flags) {
     if (is_target) {
+        if (!is_hook_enabled(3)) return orig_faccessat(dirfd, path, mode, flags);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return -1;
@@ -482,6 +600,7 @@ static int hook_faccessat(int dirfd, const char* path, int mode, int flags) {
 // ============================================================
 static DIR* hook_opendir(const char* path) {
     if (is_target) {
+        if (!is_hook_enabled(4)) return orig_opendir(path);
         if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
             errno = ENOENT;
             return nullptr;
@@ -491,8 +610,7 @@ static DIR* hook_opendir(const char* path) {
 }
 
 static DIR* hook_fdopendir(int fd) {
-    // fdopendir doesn't have a path, so we pass through
-    // but we can check /proc/self/fd/xxx
+    if (!is_hook_enabled(4)) return orig_fdopendir(fd);
     return orig_fdopendir(fd);
 }
 
@@ -500,6 +618,7 @@ static DIR* hook_fdopendir(int fd) {
 // popen / system hook — 拦截 shell 命令
 // ============================================================
 static FILE* hook_popen(const char* cmd, const char* type) {
+    if (!is_hook_enabled(5)) return orig_popen(cmd, type);
     if (is_target && shell_contains_keyword(cmd)) {
         errno = EPERM;
         return nullptr;
@@ -508,6 +627,7 @@ static FILE* hook_popen(const char* cmd, const char* type) {
 }
 
 static int hook_system(const char* cmd) {
+    if (!is_hook_enabled(5)) return orig_system(cmd);
     if (is_target && shell_contains_keyword(cmd)) {
         return -1;
     }
@@ -521,6 +641,7 @@ static int hook___system_property_get(const char* name, char* value) {
     if (!is_target || !name || !value) {
         return orig___system_property_get(name, value);
     }
+    if (!is_hook_enabled(9)) return orig___system_property_get(name, value);
     for (int i = 0; BLOCKED_PROPERTIES[i] != nullptr; i++) {
         if (strstr(name, BLOCKED_PROPERTIES[i])) {
             // 返回空值
@@ -535,6 +656,7 @@ static int hook___system_property_get(const char* name, char* value) {
 // readlink / readlinkat hook — 拦截 /proc/self/exe 读取
 // ============================================================
 static ssize_t hook_readlink(const char* path, char* buf, size_t bufsiz) {
+    if (!is_hook_enabled(6)) return orig_readlink(path, buf, bufsiz);
     if (is_target && path && strcmp(path, "/proc/self/exe") == 0) {
         size_t len = strlen(FAKE_PROC_EXE);
         if (len >= bufsiz) len = bufsiz - 1;
@@ -550,6 +672,7 @@ static ssize_t hook_readlink(const char* path, char* buf, size_t bufsiz) {
 }
 
 static ssize_t hook_readlinkat(int dirfd, const char* path, char* buf, size_t bufsiz) {
+    if (!is_hook_enabled(6)) return orig_readlinkat(dirfd, path, buf, bufsiz);
     if (is_target && path && strcmp(path, "/proc/self/exe") == 0) {
         size_t len = strlen(FAKE_PROC_EXE);
         if (len >= bufsiz) len = bufsiz - 1;
@@ -569,22 +692,14 @@ static ssize_t hook_readlinkat(int dirfd, const char* path, char* buf, size_t bu
 // DetectZ / Hunter 等通过 ptrace 检测 Zygisk 进程
 // ============================================================
 static long hook_ptrace(int request, va_list args) {
+    if (!is_hook_enabled(7)) {
+        return syscall(__NR_ptrace, request, va_arg(args, pid_t), va_arg(args, void*), va_arg(args, void*));
+    }
     if (is_target) {
-        // 阻止所有 ptrace 请求（包括 PTRACE_TRACEME / PTRACE_ATTACH）
-        // 这会阻断 DetectZ 的 ptrace-based Zygisk fork 检测
-        // 也会阻断反调试检测
         errno = EPERM;
         return -1;
     }
-    // 转发到原始 ptrace，需要消费 va_list
-    // bionic 的 ptrace 签名: long ptrace(int __op, ...)
-    // 常见调用: ptrace(PTRACE_ATTACH, pid, NULL, NULL)
-    // 我们无法在 C 中完美转发 va_list，所以直接调用 orig_ptrace
-    // 但 variadic 不能和 va_list 互转... 
-    // 方案：使用 syscall() 绕过，因为 ptrace 本质是 syscall
     return syscall(__NR_ptrace, request, va_arg(args, pid_t), va_arg(args, void*), va_arg(args, void*));
-    // 注意：上面的 syscall 方案在 is_target=true 时不会走到，
-    // 只在非目标进程时消费 args 并转发
 }
 
 // ============================================================
@@ -592,6 +707,7 @@ static long hook_ptrace(int request, va_list args) {
 // 某些检测器检查 LD_PRELOAD 等
 // ============================================================
 static char* hook_getenv(const char* name) {
+    if (!is_hook_enabled(8)) return orig_getenv(name);
     if (is_target && name) {
         if (strstr(name, "LD_PRELOAD") ||
             strstr(name, "MAGISK") ||
@@ -605,6 +721,7 @@ static char* hook_getenv(const char* name) {
 }
 
 static char* hook_secure_getenv(const char* name) {
+    if (!is_hook_enabled(8)) return orig_secure_getenv(name);
     if (is_target && name) {
         if (strstr(name, "LD_PRELOAD") ||
             strstr(name, "MAGISK") ||
@@ -621,6 +738,7 @@ static char* hook_secure_getenv(const char* name) {
 // kill hook — 拦截进程信号检测
 // ============================================================
 static int hook_kill(pid_t pid, int sig) {
+    if (!is_hook_enabled(12)) return orig_kill(pid, sig);
     return orig_kill(pid, sig);
 }
 

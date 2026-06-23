@@ -1,6 +1,7 @@
 id=MomoRedAll-Native
-name=MomoRedAll (Native Hook)
-version=v2.0
-versionCode=2
+name=MomoRedAll Native (Zygisk)
+version=v2.1
+versionCode=3
 author=pen-pig
-description=Zygisk模块v2.0：PLT interposition全覆盖12+检测器。Hook fopen/open/stat/access/opendir/popen/system/system_property_get/readlink/ptrace/getenv。目标：Momo/MagiskDetector/NativeTest/Ruru/Hunter/Oprek/SafeCheck/DetectZ/DuckDetector/DirtySepolicy/NativeRootDetector/DetectMagisk。
+description=MomoRedAll Zygisk module - 全面的ROOT/Magisk/Xposed/Frida检测器伪装，支持12+检测器，配置化开关。WebUI已启用。
+webroot=webroot

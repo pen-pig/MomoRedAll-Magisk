@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MomoRedAll-Native Config</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>MomoRedAll-Native</h1>
+            <p class="subtitle">Detection Vector Configuration</p>
+        </header>
+
+        <div class="status-bar" id="status-bar">Loading configuration...</div>
+
+        <main>
+            <!-- Targets Section -->
+            <section class="config-group">
+                <h2>Target Detectors <span class="badge">12</span></h2>
+                <p class="desc">Enable/disable spoofing for specific detector apps</p>
+                <div class="switch-grid" id="targets-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </section>
+
+            <!-- Hooks Section -->
+            <section class="config-group">
+                <h2>Hook Functions <span class="badge">13</span></h2>
+                <p class="desc">Enable/disable individual PLT interposition hooks</p>
+                <div class="switch-grid" id="hooks-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </section>
+
+            <!-- Actions -->
+            <div class="actions">
+                <button id="btn-save" class="btn btn-primary">Save Configuration</button>
+                <button id="btn-reload" class="btn btn-secondary">Reload</button>
+            </div>
+        </main>
+
+        <footer>
+            <span>MomoRedAll-Magisk v2.0 &mdash; WebUI</span>
+            <span id="footer-status"></span>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -211,6 +211,8 @@ static DIR* (*orig_opendir)(const char*) = nullptr;
 static struct dirent* (*orig_readdir)(DIR*) = nullptr;
 static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
 static int (*orig_close)(int) = nullptr;
+static int (*orig_system_property_get)(const char*, char*) = nullptr;
+static const char* (*orig_system_property_find)(const char*) = nullptr;
 
 // ====== 在构造函数中用原始函数读进程名，避免 PLT 循环 ======
 static bool check_target_process() {
@@ -261,7 +263,7 @@ FILE* hooked_fopen(const char *pathname, const char *mode) {
     if (strcmp(pathname, "/proc/self/status") == 0) {
         return fake_fopen(FAKE_STATUS, strlen(FAKE_STATUS), mode);
     }
-    if (strcmp(pathname, "/proc/self/mounts") == 0) {
+    if (strcmp(pathname, "/proc/self/mounts") == 0 || strcmp(pathname, "/proc/mounts") == 0) {
         return fake_fopen(FAKE_MOUNTS, strlen(FAKE_MOUNTS), mode);
     }
     if (strcmp(pathname, "/proc/self/wchan") == 0) {
@@ -391,6 +393,24 @@ DIR* hooked_opendir(const char *name) {
     return orig_opendir(name);
 }
 
+// __system_property_get: 伪造系统属性
+int hooked_system_property_get(const char *name, char *value) {
+    if (!orig_system_property_get)
+        orig_system_property_get = (decltype(orig_system_property_get))dlsym(RTLD_NEXT, "__system_property_get");
+    
+    if (!is_target || !name) return orig_system_property_get(name, value);
+    
+    auto it = FAKE_PROPS.find(std::string(name));
+    if (it != FAKE_PROPS.end()) {
+        if (value) {
+            strncpy(value, it->second.c_str(), 92);
+            value[91] = '\0';
+        }
+        return (int)it->second.size();
+    }
+    return orig_system_property_get(name, value);
+}
+
 // ====== PLT hook via dlsym interpose ======
 
 #define HOOK_SYM(name) do { \
@@ -421,6 +441,7 @@ static void init_hooks() {
     orig_faccessat = (decltype(orig_faccessat))dlsym(RTLD_NEXT, "faccessat");
     orig_opendir = (decltype(orig_opendir))dlsym(RTLD_NEXT, "opendir");
     orig_readdir = (decltype(orig_readdir))dlsym(RTLD_NEXT, "readdir");
+    orig_system_property_get = (decltype(orig_system_property_get))dlsym(RTLD_NEXT, "__system_property_get");
     
     LOGD("Zygisk hooks initialized");
 }
@@ -482,6 +503,10 @@ int open(const char *pathname, int flags, ...) {
 DIR* opendir(const char *name) {
     if (!orig_opendir) orig_opendir = (decltype(orig_opendir))dlsym(RTLD_NEXT, "opendir");
     return hooked_opendir(name);
+}
+
+int __system_property_get(const char *name, char *value) {
+    return hooked_system_property_get(name, value);
 }
 
 } // extern "C"

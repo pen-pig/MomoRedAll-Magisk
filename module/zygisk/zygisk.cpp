@@ -16,7 +16,7 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 // ====== Zygisk API ======
-typedef void (*zygisk_entry)(void *);
+typedef void (*zygisk_entry_fn)(void *);
 
 // ====== 目标进程 ======
 static const char *TARGETS[] = {

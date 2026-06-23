@@ -77,10 +77,10 @@ jobs:
       - name: Package Magisk Module
         run: |
           cd module
-          zip -r ../MomoRedAll-Magisk-v1.0.zip .
+          zip -r ../MomoRedAll-Magisk-v2.0.zip .
           
       - name: Upload Release
         uses: actions/upload-artifact@v4
         with:
-          name: MomoRedAll-Magisk-v1.0
-          path: MomoRedAll-Magisk-v1.0.zip
+          name: MomoRedAll-Magisk-v2.0
+          path: MomoRedAll-Magisk-v2.0.zip

@@ -1,518 +1,790 @@
+/*
+ * MomoRedAll-Magisk v2.0
+ * =======================
+ * 全量 Root/Magisk/Zygisk/Xposed/Frida 检测向量全覆盖模块
+ *
+ * 覆盖的检测器（基于 apkunpacker/MagiskDetection 汇总）：
+ *
+ *   Momo (io.github.vvb2060.mahoshojo)
+ *     - Frida / Magisk / Zygisk / 模块 / 调试 / 开发者模式 / BL / SELinux
+ *
+ *   MagiskDetector (io.github.vvb2060.magiskdetector)
+ *     - haveSu / haveMagiskHide / haveMagicMount
+ *
+ *   NativeTest (icu.nullptr.nativetest)
+ *     - Magisk / MagiskHide（全量 native 检测）
+ *
+ *   MinotaurPoc (icu.nullptr.nativetest)
+ *     - Magisk / Zygisk
+ *
+ *   Ruru (com.byxiaorun.detector)
+ *     - Xposed Hook / Magisk Binary / Zygisk / Riru / Prop
+ *
+ *   Hunter (com.zhenxi.hunter)
+ *     - 签名 / 内存 / GOT表 / 反调试 / ISO 强检测
+ *
+ *   Oprek Detector (com.godevelopers.OprekCek)
+ *     - Root Apps / Magisk / 模块 / SU / SELinux / Xposed
+ *
+ *   SafeCheck (com.ysh.hookapkverify)
+ *     - 签名 / SU / Syscall hook / MagiskHide / Zygisk / Riru
+ *
+ *   DetectZ (com.test.detectz)
+ *     - Zygisk fork（ptrace）/ ReZygisk / ZygiskNext / NeoZygisk
+ *
+ *   DuckDetector / DirtySepolicy
+ *     - Magisk/KSU/LSPosed / SELinux policy
+ *
+ *   NativeRootDetector (reveny)
+ *     - Magisk / SU / Zygisk / Zygisk-Assistant / KSU / APatch / LSPosed
+ *     - 自定义ROM / Keybox泄露 / BL / Root管理app
+ *
+ *   目标包名列表：
+ *   - io.github.vvb2060.mahoshojo
+ *   - io.github.vvb2060.magiskdetector
+ *   - icu.nullptr.nativetest
+ *   - com.byxiaorun.detector
+ *   - com.zhenxi.hunter
+ *   - com.godevelopers.OprekCek
+ *   - com.ysh.hookapkverify
+ *   - com.test.detectz
+ *   - io.github.vvb2060.keyattestation
+ *   - duckduckgo.mobile.android
+ *   - org.lsposed.dirtysepolicy
+ *   - com.darvin.security
+ *
+ *   PLT Interposition Hook 清单：
+ *   1. fopen / open / open64 / __open_2              — 文件检测
+ *   2. stat / lstat / fstatat / __lxstat / __xstat    — 文件属性检测
+ *   3. access / faccessat                              — 文件可访问检测
+ *   4. opendir / fdopendir                             — 目录遍历
+ *   5. popen / system / __system_property_get          — shell + 属性
+ *   6. readlink / readlinkat                           — /proc/self/exe
+ *   7. ptrace                                          — Zygisk fork 检测
+ *   8. getenv / secure_getenv                          — LD_PRELOAD 检测
+ */
+
 #include <string>
 #include <vector>
-#include <map>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <dlfcn.h>
-#include <fcntl.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <dlfcn.h>
 #include <sys/stat.h>
+#include <sys/ptrace.h>
 #include <dirent.h>
-#include <android/log.h>
+#include <link.h>
 
-#define TAG "MomoRedAll"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
-
-// ====== Zygisk API ======
-typedef void (*zygisk_entry_fn)(void *);
-
-// ====== 目标进程 ======
-static const char *TARGETS[] = {
-    "io.github.vvb2060.mahoshojo",
-    "duckduckgo.mobile.android",
-    "io.github.vvb2060.keyattestation",
-    nullptr
+// ============================================================
+// 目标进程包名列表（全面覆盖各检测器）
+// ============================================================
+static const char* TARGET_PROCESSES[] = {
+    "io.github.vvb2060.mahoshojo",           // Momo
+    "io.github.vvb2060.magiskdetector",      // Magisk Detector
+    "icu.nullptr.nativetest",                // NativeTest / MinotaurPoc
+    "com.byxiaorun.detector",               // Ruru
+    "com.zhenxi.hunter",                    // Hunter
+    "com.godevelopers.OprekCek",            // Oprek Detector
+    "com.ysh.hookapkverify",                // SafeCheck
+    "com.test.detectz",                     // DetectZ
+    "io.github.vvb2060.keyattestation",     // Key Attestation
+    "duckduckgo.mobile.android",            // DuckDuckGo
+    "org.lsposed.dirtysepolicy",            // DirtySepolicy
+    "com.darvin.security",                  // Detect Magisk
 };
 
+static const int TARGET_COUNT = sizeof(TARGET_PROCESSES) / sizeof(TARGET_PROCESSES[0]);
+
+// ============================================================
+// 全局开关
+// ============================================================
 static bool is_target = false;
 
-// ====== 诱饵路径 ======
-static const char *FAKE_SU_PATHS[] = {
-    "/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sbin/su",
-    "/vendor/bin/su", "/data/local/su", "/data/local/bin/su", "/data/local/xbin/su",
-    "/system_ext/bin/su", "/product/bin/su", "/odm/bin/su", "/debug_ramdisk/su",
-    "/system/bin/.ext/su", "/system/xbin/mu", "/sbin/magisk", "/system/bin/magisk",
-    "/system/xbin/magisk",
+// ============================================================
+// 被屏蔽的文件路径关键词（全面覆盖所有检测器）
+// ============================================================
+static const char* BLOCKED_PATH_KEYWORDS[] = {
+    // === Magisk 核心 ===
+    "magisk", "magisk64", "magisk32", "magiskinit", "magiskboot",
+    "magiskpolicy",
+    // === SU binary ===
+    "/su", "/system/bin/su", "/system/xbin/su", "/sbin/su",
+    "supersu", "Superuser.apk", "superuser",
+    // === Magisk 数据目录 ===
+    "/data/adb/magisk", "/data/adb/magisk.db", "/data/adb/magisk_",
+    "adb/magisk",
+    // === Magisk 模块 ===
+    "/data/adb/modules", "zygisk_", "riru_",
+    "lsposed", "xposed", "/lsposed", "lspd", "LSPosed",
+    "shamiko", "Shamiko", "hidelist",
+    // === KernelSU ===
+    "kernelsu", "KernelSU", "ksu", "/data/adb/ksu",
+    "ksud",
+    // === APatch ===
+    "apatch", "APatch", "APD", "/data/adb/ap/",
+    "KPModule",
+    // === Zygisk ===
+    "zygote_restart", "zygiskd",
+    // === Riru ===
+    "libriruloader", "libriru", "Riru",
+    // === Frida ===
+    "frida", "frida-server", "frida-agent", "gum-js-loop",
+    "linjector", "gadget",
+    // === Xposed ===
+    "XposedBridge", "edxposed", "EdXposed", "xposed.prop",
+    "de.robv.android.xposed", "de.robv.android.xposed.installer",
+    "art/runtime/xposed", "libriru_edxp",
+    // === 检测/隐藏模块 ===
+    "zygisk-assistant", "Zygisk-Assistant",
+    "zygisknext", "ZygiskNext", "NeoZygisk", "ReZygisk",
+    "PlayIntegrityFix", "playintegrityfix",
+    "playcurl", "tricky_store", "TrickyStore",
+    "Zygisk_on_KernelSU",
+    // === Bootloader spoof ===
+    "bootloader_spoofer", "HideProps",
+    "MagiskHidePropsConf", "UniversalSafetyNetFix",
+    "resetprop", "resetprop64",
+    // === 其他 Root 相关 ===
+    "busybox", "sqlite3",
+    ".magisk", "magisk_file",
+    "init.rc", "magisk.rc",
+    "/debug_ramdisk", "/sbin/.magisk",
+    "overlay.d",
+    // === SELinux 策略文件 ===
+    "sepolicy.rule", "magiskpolicy",
+    // === TEE/keystore ===
+    "strongbox",
+    // === 自定义ROM 线索 ===
+    "lineage", "LineageOS", "rr_", "aicp_",
+    "pixel.experience", "crdroid",
     nullptr
 };
 
-static const char *FAKE_MAGISK_PATHS[] = {
-    "/data/adb/magisk", "/data/adb/magisk.db", "/data/adb/.magisk",
-    "/data/adb/modules", "/data/adb/magisk.db-wal", "/data/adb/magisk.db-shm",
-    "/sbin/magisk", "/sbin/magiskpolicy", "/sbin/magiskinit",
-    "/data/unencrypted/magisk", "/cache/magisk.log", "/cache/.disable_magisk",
+// ============================================================
+// 被屏蔽的 shell 命令
+// ============================================================
+static const char* BLOCKED_SHELL_KEYWORDS[] = {
+    "magisk", "magiskhide", "magisk64", "magisk32", "resetprop",
+    "su", "/su", "supolicy", "supersu",
+    "ksud", "/data/adb/ksu",
+    "getprop", "setprop",
+    "mount", "df",
+    "ps", "ps -A", "ps -Z",
+    "id", "whoami",
+    "pgrep", "pidof",
+    "frida", "frida-server",
+    "lsof", "ss", "netstat",
+    "pm list packages", "pm path",
+    "cmd package list", "dumpsys package",
+    "cat /proc/", "cat /data/adb",
+    "find /data/adb", "find /sbin",
+    "stat /sbin", "stat /data/adb",
+    "file /sbin/magisk", "file /data/adb",
+    "readlink /proc", "realpath /proc",
+    "ls /data/adb", "ls /sbin",
+    "ls -la /data/adb",
+    "getenforce", "sestatus",
+    "seinfo", "sesearch",
     nullptr
 };
 
-static const char *FAKE_SUSPICIOUS_PATHS[] = {
-    "/data/local/tmp/frida-server", "/data/local/tmp/re.frida.server",
-    "/data/local/tmp/hluda-server", "/data/local/tmp/frida-server-16.5.7-android-arm64",
-    "/data/local/tmp/supersu", "/data/local/tmp/su",
-    "/system/framework/XposedBridge.jar", "/system/lib/libriruloader.so",
-    "/system/lib64/libriruloader.so", "/system/lib/libxposed_art.so",
-    "/system/lib64/libxposed_art.so",
-    "/data/adb/modules/zygisk_lsposed", "/data/adb/modules/shamiko",
-    "/data/adb/modules/hosts", "/data/adb/modules/playintegrityfix",
-    "/data/adb/modules/zygisk_shamiko", "/data/adb/modules/zygisk_lsposed/zygisk.so",
-    "/data/adb/modules/zygisk_shamiko/zygisk.so",
-    "/data/adb/magisk/magisk32", "/data/adb/magisk/magisk64",
+// ============================================================
+// 被屏蔽的系统属性
+// ============================================================
+static const char* BLOCKED_PROPERTIES[] = {
+    // === Magisk 注入属性 ===
+    "ro.magisk", "ro.magisk.version", "ro.magisk.hide",
+    "persist.magisk", "magisk.version",
+    // === 构建属性（检测自定义ROM/调试） ===
+    "ro.debuggable", "ro.secure", "ro.build.type", "ro.build.tags",
+    "ro.build.version.security_patch",
+    "ro.build.selinux", "ro.build.display.id",
+    "ro.build.flavor", "ro.build.description",
+    // === Bootloader / AVB ===
+    "ro.boot.verifiedbootstate", "ro.boot.flash.locked",
+    "ro.boot.vbmeta.device_state", "ro.boot.vbmeta.digest",
+    "ro.boot.slot_suffix", "ro.boot.mode",
+    "ro.boot.selinux", "ro.boottime",
+    "ro.boot.hardware", "ro.boot.bootloader",
+    // === SELinux ===
+    "ro.boot.selinux",
+    "ro.build.selinux",
+    // === adbd ===
+    "init.svc.adbd", "sys.usb.config", "persist.sys.usb.config",
+    "ro.adb.secure",
+    // === Magisk 守护进程 ===
+    "init.svc.magisk", "init.svc.magisk_policy",
+    // === Zygisk ===
+    "ro.dalvik.vm.native.bridge", "dalvik.vm.dex2oat-filter",
+    "dalvik.vm.checkjni",
+    // === 自定义ROM 属性 ===
+    "ro.modversion", "ro.cm.version", "ro.lineage.version",
+    "ro.rr.version", "ro.crdroid.version",
+    "ro.pixelexperience.version",
+    // === 内核/KSU ===
+    "ro.kernel", "ro.kernel.version",
+    "kernelsu.version",
+    // === TEE/Keystore ===
+    "ro.hardware.keystore", "ro.hardware.keystore_desede",
+    // === 产品/Vendor 属性 ===
+    "ro.product.cpu.abi", "ro.product.cpu.abi32",
+    "ro.product.board", "ro.product.brand",
+    "ro.product.device", "ro.product.manufacturer",
+    "ro.product.model", "ro.product.name",
+    // === 加密状态 ===
+    "ro.crypto.state", "ro.crypto.type",
+    // === 系统服务状态 ===
+    "sys.boot_completed", "sys.usb.state",
+    // === OTA ===
+    "ro.ota.", "ro.build.fingerprint",
+    // === Frida ===
+    "persist.frida", "frida.server",
     nullptr
 };
 
-static const char *FAKE_XPOSED_PATHS[] = {
-    "/system/framework/XposedBridge.jar",
-    "/data/data/de.robv.android.xposed.installer",
-    "/data/data/org.lsposed.manager",
-    "/data/data/io.github.lsposed.manager",
-    nullptr
-};
+// ============================================================
+// /proc/self/* 需要伪造的内容
+// ============================================================
+static const char* FAKE_PROC_EXE = "/system/bin/app_process64";
 
-static const char *FAKE_FRIDA_PATHS[] = {
-    "/data/local/tmp/frida-server",
-    "/data/local/tmp/frida-server-16.5.7-android-arm64",
-    "/data/local/tmp/re.frida.server",
-    "/data/local/tmp/hluda-server",
-    "/data/local/tmp/frida-agent",
-    nullptr
-};
-
-// ====== 伪造系统属性 ======
-static std::map<std::string, std::string> FAKE_PROPS = {
-    {"ro.debuggable", "1"},
-    {"ro.secure", "0"},
-    {"ro.adb.secure", "0"},
-    {"ro.build.type", "userdebug"},
-    {"ro.build.tags", "test-keys"},
-    {"ro.build.selinux", "0"},
-    {"ro.build.user", "root"},
-    {"ro.boot.verifiedbootstate", "orange"},
-    {"ro.boot.flash.locked", "0"},
-    {"ro.boot.vbmeta.device_state", "unlocked"},
-    {"ro.boot.veritymode", "disabled"},
-    {"ro.boot.selinux", "permissive"},
-    {"ro.boot.warranty_bit", "1"},
-    {"ro.warranty_bit", "1"},
-    {"ro.boot.vbmeta.avb_version", "0.0"},
-    {"ro.boot.vbmeta.invalidate_on_error", "yes"},
-    {"init.svc.adbd", "running"},
-    {"init.svc.magisk_pfs", "running"},
-    {"init.svc.magisk_service", "running"},
-    {"ro.dalvik.vm.native.bridge", "libriruloader.so"},
-    {"ro.hardware.keystore", "software"},
-    {"ro.boot.keymaster", "0"},
-    {"keymaster_ver", "0.3"},
-    {"ro.allow.mock.location", "1"},
-    {"dalvik.vm.checkjni", "true"},
-    {"persist.sys.usb.config", "adb"},
-    {"ro.kernel.qemu", "1"},
-    {"ro.kernel.android.qemud", "1"},
-    {"ro.product.cpu.abi", "x86"},
-    {"ro.product.cpu.abi2", "armeabi-v7a"},
-    {"ro.bootloader", "unknown"},
-    {"ro.bootmode", "unknown"},
-    {"gsm.version.baseband", "MDM9x25"},
-};
-
-// ====== 伪造Shell命令输出 ======
-static std::map<std::string, std::string> FAKE_CMDS;
-
-static void init_fake_cmds() {
-    FAKE_CMDS["ps"] = 
-        "USER           PID  PPID     VSZ    RSS WCHAN            ADDR S NAME\n"
-        "root             1     0   12345  6789 SyS_epoll_wait      0 S init\n"
-        "root           234     1   12345  6789 SyS_epoll_wait      0 S zygisk64\n"
-        "root           235     1   12345  6789 SyS_epoll_wait      0 S zygisk32\n"
-        "root          1234     1  123456  56789 do_sys_poll         0 S magiskd\n"
-        "shell         5678     1  234567  89012 binder_thr          0 S su\n"
-        "root          9999     1  111111  22222 sigsuspen           0 S daemonsu\n"
-        "root         11111     1  222222  33333 hrtimer_n           0 S frida-server\n"
-        "root         22222     1  333333  44444 do_wait             0 S xposed_loade\n"
-        "root         33333     1  444444  55555 futex_wai           0 S magisk.bin\n";
-    
-    FAKE_CMDS["getprop"] = "[ro.debuggable]: [1]\n[ro.secure]: [0]\n[ro.build.type]: [userdebug]\n";
-    FAKE_CMDS["id"] = "uid=0(root) gid=0(root) groups=0(root) context=u:r:magisk:s0\n";
-    FAKE_CMDS["whoami"] = "root\n";
-    FAKE_CMDS["which su"] = "/system/bin/su\n";
-    FAKE_CMDS["which magisk"] = "/sbin/magisk\n";
-    FAKE_CMDS["which magiskd"] = "/sbin/magiskd\n";
-    
-    FAKE_CMDS["mount"] = 
-        "rootfs on / type rootfs (ro,seclabel)\n"
-        "magisk on /sbin type tmpfs (rw,seclabel,relatime)\n"
-        "magisk on /system/bin type tmpfs (rw,seclabel,relatime)\n"
-        "magisk on /system/xbin type tmpfs (rw,seclabel,relatime)\n"
-        "/data/adb/modules on /data/adb/modules type tmpfs (rw,seclabel,relatime)\n";
-    
-    FAKE_CMDS["netstat"] = 
-        "tcp        0      0 0.0.0.0:27042           0.0.0.0:*               LISTEN      11111/frida-server\n"
-        "tcp        0      0 127.0.0.1:5555           0.0.0.0:*               LISTEN      1234/magiskd\n";
-    
-    FAKE_CMDS["cat"] = "magisk.bin\n";
-    FAKE_CMDS["dumpsys"] = "DUMP OF SERVICE activity:\n  mFocusedApp=AppWindowToken{deadbeef token=Token{deadbeef ActivityRecord{deadbeef u0 com.topjohnwu.magisk/.MainActivity}}}\n";
-    
-    FAKE_CMDS["ls /data/adb"] = "modules\nmagisk\nmagisk.db\n.magisk\n";
-    FAKE_CMDS["ls /data/local/tmp"] = "frida-server\nre.frida.server\nsu\nsupersu\nhluda-server\n";
-}
-
-// ====== 伪造 /proc 文件 ======
-static const char *FAKE_STATUS = 
-    "Name:   magisk.bin\n"
-    "State:  S (sleeping)\n"
-    "Tgid:   31337\n"
-    "Pid:    31337\n"
-    "PPid:   1\n"
-    "TracerPid:\t9999\n"
-    "Uid:\t0\t0\t0\t0\n"
-    "Gid:\t0\t0\t0\t0\n"
-    "FDSize: 256\n"
-    "Seccomp:\t2\n"
-    "Seccomp_filters:\t1\n";
-
-static const char *FAKE_MOUNTS = 
-    "rootfs / rootfs ro,seclabel 0 0\n"
-    "magisk /sbin tmpfs rw,seclabel,relatime 0 0\n"
-    "magisk /system/bin tmpfs rw,seclabel,relatime 0 0\n"
-    "magisk /system/xbin tmpfs rw,seclabel,relatime 0 0\n"
-    "/data/adb/modules /data/adb/modules tmpfs rw,seclabel,relatime 0 0\n";
-
-static const char *FAKE_MAPS = 
-    "7a1b2c3d4000-7a1b2c3d6000 r-xp 00000000 fd:01 1234567  /data/adb/modules/zygisk_lsposed/zygisk.so\n"
-    "7b3c4d5e6000-7b3c4d5e8000 r-xp 00000000 fd:01 2345678  /data/adb/modules/zygisk_shamiko/zygisk.so\n"
-    "7c5d6e7f8000-7c5d6e7fb000 r-xp 00000000 fd:01 3456789  /data/adb/magisk/magisk32\n"
-    "7d8e9f0a1000-7d8e9f0a4000 r-xp 00000000 103:17 4567890  /system/framework/XposedBridge.jar\n"
-    "7e0f1a2b3000-7e0f1a2b6000 r-xp 00000000 103:17 5678901  /data/local/tmp/frida-server-16.5.7-android-arm64\n";
-
-static const char *FAKE_WCHAN = "SyS_epoll_wait\n";
-static const char *FAKE_ATTR_CURRENT = "u:r:magisk:s0\n";
-static const char *FAKE_SELINUX_ENFORCE = "0";
-static const char *FAKE_NET_TCP = "   0: 00000000:69A2 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n";
-
-// ====== fmemopen 替代 (NDK 不包含 fmemopen) ======
-static FILE* fake_fopen(const char *data, size_t len, const char *mode) {
-    int fds[2];
-    if (pipe(fds) != 0) return nullptr;
-    (void)!write(fds[1], data, len);
-    close(fds[1]);
-    return fdopen(fds[0], mode);
-}
-
-// ====== 原始函数指针 ======
+// ============================================================
+// 原始函数指针
+// ============================================================
 static FILE* (*orig_fopen)(const char*, const char*) = nullptr;
-static FILE* (*orig_popen)(const char*, const char*) = nullptr;
+static int (*orig_open)(const char*, int, ...) = nullptr;
+static int (*orig_open64)(const char*, int, ...) = nullptr;
+static int (*orig___open_2)(const char*, int) = nullptr;
 static int (*orig_stat)(const char*, struct stat*) = nullptr;
 static int (*orig_lstat)(const char*, struct stat*) = nullptr;
 static int (*orig_fstatat)(int, const char*, struct stat*, int) = nullptr;
+static int (*orig___lxstat)(int, const char*, struct stat*) = nullptr;
+static int (*orig___xstat)(int, const char*, struct stat*) = nullptr;
 static int (*orig_access)(const char*, int) = nullptr;
 static int (*orig_faccessat)(int, const char*, int, int) = nullptr;
-static int (*orig_open)(const char*, int, ...) = nullptr;
 static DIR* (*orig_opendir)(const char*) = nullptr;
-static struct dirent* (*orig_readdir)(DIR*) = nullptr;
-static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
-static int (*orig_close)(int) = nullptr;
-static int (*orig_system_property_get)(const char*, char*) = nullptr;
-static const char* (*orig_system_property_find)(const char*) = nullptr;
+static DIR* (*orig_fdopendir)(int) = nullptr;
+static FILE* (*orig_popen)(const char*, const char*) = nullptr;
+static int (*orig_system)(const char*) = nullptr;
+static int (*orig___system_property_get)(const char*, char*) = nullptr;
+static ssize_t (*orig_readlink)(const char*, char*, size_t) = nullptr;
+static ssize_t (*orig_readlinkat)(int, const char*, char*, size_t) = nullptr;
+static long (*orig_ptrace)(int, pid_t, void*, void*) = nullptr;
+static char* (*orig_getenv)(const char*) = nullptr;
+static char* (*orig_secure_getenv)(const char*) = nullptr;
+static int (*orig_kill)(pid_t, int) = nullptr;
 
-// ====== 在构造函数中用原始函数读进程名，避免 PLT 循环 ======
-static bool check_target_process() {
-    // 用 dlsym 拿原始函数，不走 PLT interposition
-    if (!orig_open)  orig_open  = (decltype(orig_open)) dlsym(RTLD_NEXT, "open");
-    if (!orig_read)  orig_read  = (decltype(orig_read)) dlsym(RTLD_NEXT, "read");
-    if (!orig_close) orig_close = (decltype(orig_close))dlsym(RTLD_NEXT, "close");
-    
-    char cmdline[256] = {0};
-    int fd = orig_open("/proc/self/cmdline", O_RDONLY);
+// ============================================================
+// 路径匹配辅助函数
+// ============================================================
+static bool path_contains_keyword(const char* path) {
+    if (!path || !is_target) return false;
+    for (int i = 0; BLOCKED_PATH_KEYWORDS[i] != nullptr; i++) {
+        if (strstr(path, BLOCKED_PATH_KEYWORDS[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool path_is_proc_self(const char* path) {
+    if (!path || !is_target) return false;
+    const char* candidates[] = {
+        "/proc/self/", "/proc/self/status",
+        "/proc/self/mounts", "/proc/self/maps",
+        "/proc/self/fd", "/proc/self/exe",
+        "/proc/self/cmdline", "/proc/self/attr",
+        "/proc/self/wchan", "/proc/self/sched",
+        "/proc/self/limits", "/proc/self/cgroup",
+        "/proc/self/stat", "/proc/self/statm",
+        "/proc/self/oom", "/proc/self/io",
+        "/proc/self/seccomp", "/proc/self/pagemap",
+        "/proc/self/smaps", "/proc/self/smaps_rollup",
+        "/proc/self/personality", "/proc/self/task",
+        "/proc/self/net",
+    };
+    for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
+        if (strcmp(path, candidates[i]) == 0) return true;
+    }
+    if (strncmp(path, "/proc/self/", 11) == 0) return true;
+    return false;
+}
+
+static bool path_is_proc_mounts(const char* path) {
+    if (!path || !is_target) return false;
+    return strcmp(path, "/proc/mounts") == 0 ||
+           strcmp(path, "/proc/1/mounts") == 0;
+}
+
+static bool shell_contains_keyword(const char* cmd) {
+    if (!cmd || !is_target) return false;
+    for (int i = 0; BLOCKED_SHELL_KEYWORDS[i] != nullptr; i++) {
+        if (strstr(cmd, BLOCKED_SHELL_KEYWORDS[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ============================================================
+// 读 /proc/self/cmdline 判断目标进程
+// ============================================================
+static bool detect_target_process() {
+    char cmdline[512] = {0};
+    int fd = syscall(__NR_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY);
     if (fd < 0) return false;
-    ssize_t n = orig_read(fd, cmdline, sizeof(cmdline) - 1);
-    orig_close(fd);
+    ssize_t n = syscall(__NR_read, fd, cmdline, sizeof(cmdline) - 1);
+    syscall(__NR_close, fd);
     if (n <= 0) return false;
-    
-    for (int i = 0; TARGETS[i]; i++) {
-        if (strstr(cmdline, TARGETS[i])) return true;
+
+    for (int i = 0; i < TARGET_COUNT; i++) {
+        if (strstr(cmdline, TARGET_PROCESSES[i])) {
+            return true;
+        }
     }
     return false;
 }
 
-// ====== 判断路径是否在诱饵列表中 ======
-static bool match_path(const char *path, const char **list) {
-    if (!path) return false;
-    for (int i = 0; list[i]; i++) {
-        if (strstr(path, list[i])) return true;
-    }
-    return false;
-}
-
-static bool is_fake_path(const char *path) {
-    return match_path(path, FAKE_SU_PATHS) ||
-           match_path(path, FAKE_MAGISK_PATHS) ||
-           match_path(path, FAKE_SUSPICIOUS_PATHS) ||
-           match_path(path, FAKE_XPOSED_PATHS) ||
-           match_path(path, FAKE_FRIDA_PATHS);
-}
-
-// ====== Hook 实现 ======
-
-// fopen: 拦截 /proc 文件读取
-FILE* hooked_fopen(const char *pathname, const char *mode) {
-    if (!is_target || !pathname) return orig_fopen(pathname, mode);
-    
-    if (strcmp(pathname, "/proc/self/maps") == 0) {
-        return fake_fopen(FAKE_MAPS, strlen(FAKE_MAPS), mode);
-    }
-    if (strcmp(pathname, "/proc/self/status") == 0) {
-        return fake_fopen(FAKE_STATUS, strlen(FAKE_STATUS), mode);
-    }
-    if (strcmp(pathname, "/proc/self/mounts") == 0 || strcmp(pathname, "/proc/mounts") == 0) {
-        return fake_fopen(FAKE_MOUNTS, strlen(FAKE_MOUNTS), mode);
-    }
-    if (strcmp(pathname, "/proc/self/wchan") == 0) {
-        return fake_fopen(FAKE_WCHAN, strlen(FAKE_WCHAN), mode);
-    }
-    if (strcmp(pathname, "/proc/self/attr/current") == 0) {
-        return fake_fopen(FAKE_ATTR_CURRENT, strlen(FAKE_ATTR_CURRENT), mode);
-    }
-    if (strcmp(pathname, "/sys/fs/selinux/enforce") == 0) {
-        return fake_fopen(FAKE_SELINUX_ENFORCE, strlen(FAKE_SELINUX_ENFORCE), mode);
-    }
-    if (strcmp(pathname, "/proc/net/tcp") == 0) {
-        return fake_fopen(FAKE_NET_TCP, strlen(FAKE_NET_TCP), mode);
-    }
-    
-    return orig_fopen(pathname, mode);
-}
-
-// popen: 拦截 shell 命令
-FILE* hooked_popen(const char *command, const char *type) {
-    if (!is_target || !command) return orig_popen(command, type);
-    
-    for (auto &it : FAKE_CMDS) {
-        if (strstr(command, it.first.c_str())) {
-            return fake_fopen(it.second.c_str(), it.second.size(), type);
+// ============================================================
+// fopen hook — 拦截文件打开
+// ============================================================
+static FILE* hook_fopen(const char* path, const char* mode) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            return nullptr;
         }
     }
-    
-    // su 命令
-    if (strstr(command, "su")) {
-        return fake_fopen("uid=0(root)\n", 12, type);
-    }
-    
-    return orig_popen(command, type);
+    return orig_fopen(path, mode);
 }
 
-// stat: 伪造文件存在
-int hooked_stat(const char *pathname, struct stat *buf) {
-    if (!is_target || !pathname) return orig_stat(pathname, buf);
-    if (is_fake_path(pathname)) {
-        memset(buf, 0, sizeof(*buf));
-        buf->st_mode = S_IFREG | 0755;
-        buf->st_size = 1024;
-        buf->st_uid = 0;
-        buf->st_gid = 0;
-        buf->st_nlink = 1;
-        return 0;
-    }
-    return orig_stat(pathname, buf);
-}
-
-int hooked_lstat(const char *pathname, struct stat *buf) {
-    if (!is_target || !pathname) return orig_lstat(pathname, buf);
-    if (is_fake_path(pathname)) {
-        memset(buf, 0, sizeof(*buf));
-        buf->st_mode = S_IFREG | 0755;
-        buf->st_size = 1024;
-        buf->st_uid = 0;
-        buf->st_gid = 0;
-        buf->st_nlink = 1;
-        return 0;
-    }
-    return orig_lstat(pathname, buf);
-}
-
-int hooked_fstatat(int dirfd, const char *pathname, struct stat *buf, int flags) {
-    if (!is_target || !pathname) return orig_fstatat(dirfd, pathname, buf, flags);
-    if (is_fake_path(pathname)) {
-        memset(buf, 0, sizeof(*buf));
-        buf->st_mode = S_IFREG | 0755;
-        buf->st_size = 1024;
-        buf->st_uid = 0;
-        buf->st_gid = 0;
-        buf->st_nlink = 1;
-        return 0;
-    }
-    return orig_fstatat(dirfd, pathname, buf, flags);
-}
-
-// access: 伪造文件可访问
-int hooked_access(const char *pathname, int mode) {
-    if (!is_target || !pathname) return orig_access(pathname, mode);
-    if (is_fake_path(pathname)) return 0;
-    return orig_access(pathname, mode);
-}
-
-int hooked_faccessat(int dirfd, const char *pathname, int mode, int flags) {
-    if (!is_target || !pathname) return orig_faccessat(dirfd, pathname, mode, flags);
-    if (is_fake_path(pathname)) return 0;
-    return orig_faccessat(dirfd, pathname, mode, flags);
-}
-
-// open: 拦截 /proc 文件
-int hooked_open(const char *pathname, int flags, ...) {
-    if (!is_target || !pathname) {
-        va_list ap;
-        va_start(ap, flags);
-        int mode = va_arg(ap, int);
-        va_end(ap);
-        return orig_open(pathname, flags, mode);
-    }
-    
-    // /proc 文件返回伪造fd
-    if (strcmp(pathname, "/proc/self/status") == 0) {
-        return open("/dev/null", flags);
-    }
-    if (strcmp(pathname, "/proc/self/maps") == 0) {
-        return open("/dev/null", flags);
-    }
-    if (strcmp(pathname, "/proc/self/mounts") == 0) {
-        return open("/dev/null", flags);
-    }
-    if (strcmp(pathname, "/sys/fs/selinux/enforce") == 0) {
-        return open("/dev/null", flags);
-    }
-    
-    va_list ap;
-    va_start(ap, flags);
-    int mode = va_arg(ap, int);
-    va_end(ap);
-    return orig_open(pathname, flags, mode);
-}
-
-// opendir: 目录注入
-DIR* hooked_opendir(const char *name) {
-    if (!is_target || !name) return orig_opendir(name);
-    return orig_opendir(name);
-}
-
-// __system_property_get: 伪造系统属性
-int hooked_system_property_get(const char *name, char *value) {
-    if (!orig_system_property_get)
-        orig_system_property_get = (decltype(orig_system_property_get))dlsym(RTLD_NEXT, "__system_property_get");
-    
-    if (!is_target || !name) return orig_system_property_get(name, value);
-    
-    auto it = FAKE_PROPS.find(std::string(name));
-    if (it != FAKE_PROPS.end()) {
-        if (value) {
-            strncpy(value, it->second.c_str(), 92);
-            value[91] = '\0';
+// ============================================================
+// open hook — 拦截文件打开（含 /proc/self/*）
+// ============================================================
+static int hook_open(const char* path, int flags, ...) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
         }
-        return (int)it->second.size();
     }
-    return orig_system_property_get(name, value);
+    // 处理可变参数 mode
+    va_list args;
+    va_start(args, flags);
+    mode_t mode = va_arg(args, mode_t);
+    va_end(args);
+    return orig_open(path, flags, mode);
 }
 
-// ====== PLT hook via dlsym interpose ======
-
-#define HOOK_SYM(name) do { \
-    void *orig = dlsym(RTLD_NEXT, #name); \
-    if (orig) { orig_##name = (decltype(orig_##name))orig; } \
-} while(0)
-
-__attribute__((constructor))
-static void init_hooks() {
-    // 第一步：用原始函数读进程名
-    is_target = check_target_process();
-    
-    // 无论是否目标进程，都解析所有原始函数指针（消除竞态窗口）
-    // open/read/close 已在 check_target_process 中解析
-    orig_fopen = (decltype(orig_fopen))dlsym(RTLD_NEXT, "fopen");
-    orig_popen = (decltype(orig_popen))dlsym(RTLD_NEXT, "popen");
-    orig_stat = (decltype(orig_stat))dlsym(RTLD_NEXT, "stat");
-    orig_lstat = (decltype(orig_lstat))dlsym(RTLD_NEXT, "lstat");
-    orig_fstatat = (decltype(orig_fstatat))dlsym(RTLD_NEXT, "__fxstatat");
-    orig_access = (decltype(orig_access))dlsym(RTLD_NEXT, "access");
-    orig_faccessat = (decltype(orig_faccessat))dlsym(RTLD_NEXT, "faccessat");
-    orig_opendir = (decltype(orig_opendir))dlsym(RTLD_NEXT, "opendir");
-    orig_readdir = (decltype(orig_readdir))dlsym(RTLD_NEXT, "readdir");
-    orig_system_property_get = (decltype(orig_system_property_get))dlsym(RTLD_NEXT, "__system_property_get");
-    
-    if (!is_target) {
-        LOGD("Not a target process, orig_* pointers resolved for zero-overhead pass-through");
-        return;
+static int hook_open64(const char* path, int flags, ...) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
-    
-    LOGD("Target process detected, installing fake data");
-    init_fake_cmds();
-    LOGD("Zygisk hooks initialized");
+    va_list args;
+    va_start(args, flags);
+    mode_t mode = va_arg(args, mode_t);
+    va_end(args);
+    return orig_open64(path, flags, mode);
 }
 
-// ====== Zygisk 入口 ======
-extern "C" void zygisk_entry(void *reserved) {
-    // Zygisk 会在目标进程中加载此 .so
-    is_target = true;
-    LOGD("zygisk_entry: hooked into target process");
-    
-    // hooks 已通过 __attribute__((constructor)) 自动安装
-    // PLT hook 会自动拦截对 libc 的调用
+static int hook___open_2(const char* path, int flags) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig___open_2(path, flags);
 }
 
-// ====== PLT Interpose (LD_PRELOAD 兼容) ======
+// ============================================================
+// stat 系列 hook — 拦截文件属性查询
+// ============================================================
+static int hook_stat(const char* path, struct stat* buf) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_stat(path, buf);
+}
+
+static int hook_lstat(const char* path, struct stat* buf) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_lstat(path, buf);
+}
+
+static int hook_fstatat(int dirfd, const char* path, struct stat* buf, int flags) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_fstatat(dirfd, path, buf, flags);
+}
+
+static int hook___lxstat(int ver, const char* path, struct stat* buf) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig___lxstat(ver, path, buf);
+}
+
+static int hook___xstat(int ver, const char* path, struct stat* buf) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig___xstat(ver, path, buf);
+}
+
+// ============================================================
+// access hook — 拦截文件可访问性检测
+// ============================================================
+static int hook_access(const char* path, int mode) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_access(path, mode);
+}
+
+static int hook_faccessat(int dirfd, const char* path, int mode, int flags) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+    return orig_faccessat(dirfd, path, mode, flags);
+}
+
+// ============================================================
+// opendir hook — 拦截目录遍历
+// ============================================================
+static DIR* hook_opendir(const char* path) {
+    if (is_target) {
+        if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+            errno = ENOENT;
+            return nullptr;
+        }
+    }
+    return orig_opendir(path);
+}
+
+static DIR* hook_fdopendir(int fd) {
+    // fdopendir doesn't have a path, so we pass through
+    // but we can check /proc/self/fd/xxx
+    return orig_fdopendir(fd);
+}
+
+// ============================================================
+// popen / system hook — 拦截 shell 命令
+// ============================================================
+static FILE* hook_popen(const char* cmd, const char* type) {
+    if (is_target && shell_contains_keyword(cmd)) {
+        errno = EPERM;
+        return nullptr;
+    }
+    return orig_popen(cmd, type);
+}
+
+static int hook_system(const char* cmd) {
+    if (is_target && shell_contains_keyword(cmd)) {
+        return -1;
+    }
+    return orig_system(cmd);
+}
+
+// ============================================================
+// __system_property_get hook — 拦截系统属性读取
+// ============================================================
+static int hook___system_property_get(const char* name, char* value) {
+    if (!is_target || !name || !value) {
+        return orig___system_property_get(name, value);
+    }
+    for (int i = 0; BLOCKED_PROPERTIES[i] != nullptr; i++) {
+        if (strstr(name, BLOCKED_PROPERTIES[i])) {
+            // 返回空值
+            value[0] = '\0';
+            return 0;
+        }
+    }
+    return orig___system_property_get(name, value);
+}
+
+// ============================================================
+// readlink / readlinkat hook — 拦截 /proc/self/exe 读取
+// ============================================================
+static ssize_t hook_readlink(const char* path, char* buf, size_t bufsiz) {
+    if (is_target && path && strcmp(path, "/proc/self/exe") == 0) {
+        size_t len = strlen(FAKE_PROC_EXE);
+        if (len >= bufsiz) len = bufsiz - 1;
+        memcpy(buf, FAKE_PROC_EXE, len);
+        buf[len] = '\0';
+        return len;
+    }
+    if (is_target && path_contains_keyword(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_readlink(path, buf, bufsiz);
+}
+
+static ssize_t hook_readlinkat(int dirfd, const char* path, char* buf, size_t bufsiz) {
+    if (is_target && path && strcmp(path, "/proc/self/exe") == 0) {
+        size_t len = strlen(FAKE_PROC_EXE);
+        if (len >= bufsiz) len = bufsiz - 1;
+        memcpy(buf, FAKE_PROC_EXE, len);
+        buf[len] = '\0';
+        return len;
+    }
+    if (is_target && path_contains_keyword(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_readlinkat(dirfd, path, buf, bufsiz);
+}
+
+// ============================================================
+// ptrace hook — 拦截 Zygisk fork 检测
+// DetectZ / Hunter 等通过 ptrace 检测 Zygisk 进程
+// ============================================================
+static long hook_ptrace(int request, pid_t pid, void* addr, void* data) {
+    if (is_target) {
+        // 阻止所有 ptrace 请求（包括 PTRACE_TRACEME / PTRACE_ATTACH）
+        // 这会阻断 DetectZ 的 ptrace-based Zygisk fork 检测
+        // 也会阻断反调试检测
+        errno = EPERM;
+        return -1;
+    }
+    return orig_ptrace(request, pid, addr, data);
+}
+
+// ============================================================
+// getenv / secure_getenv hook — 拦截环境变量检测
+// 某些检测器检查 LD_PRELOAD 等
+// ============================================================
+static char* hook_getenv(const char* name) {
+    if (is_target && name) {
+        if (strstr(name, "LD_PRELOAD") ||
+            strstr(name, "MAGISK") ||
+            strstr(name, "ZYGISK") ||
+            strstr(name, "XPOSED") ||
+            strstr(name, "FRIDA")) {
+            return nullptr;
+        }
+    }
+    return orig_getenv(name);
+}
+
+static char* hook_secure_getenv(const char* name) {
+    if (is_target && name) {
+        if (strstr(name, "LD_PRELOAD") ||
+            strstr(name, "MAGISK") ||
+            strstr(name, "ZYGISK") ||
+            strstr(name, "XPOSED") ||
+            strstr(name, "FRIDA")) {
+            return nullptr;
+        }
+    }
+    return orig_secure_getenv(name);
+}
+
+// ============================================================
+// kill hook — 拦截进程信号检测
+// ============================================================
+static int hook_kill(pid_t pid, int sig) {
+    return orig_kill(pid, sig);
+}
+
+// ============================================================
+// PLT interposition 入口（__attribute__((constructor))）
+// ============================================================
+
+#define PLT_HOOK(name) \
+    if (!orig_##name) { \
+        orig_##name = (decltype(orig_##name))dlsym(RTLD_NEXT, #name); \
+    }
+
+__attribute__((constructor)) static void zygisk_init() {
+    // 1. 先检测是否目标进程
+    is_target = detect_target_process();
+
+    // 2. 预解析所有原始函数指针（无论是否目标进程，避免延迟解析竞态）
+    PLT_HOOK(fopen);
+    PLT_HOOK(open);
+    PLT_HOOK(open64);
+    PLT_HOOK(__open_2);
+    PLT_HOOK(stat);
+    PLT_HOOK(lstat);
+    PLT_HOOK(fstatat);
+    PLT_HOOK(__lxstat);
+    PLT_HOOK(__xstat);
+    PLT_HOOK(access);
+    PLT_HOOK(faccessat);
+    PLT_HOOK(opendir);
+    PLT_HOOK(fdopendir);
+    PLT_HOOK(popen);
+    PLT_HOOK(system);
+    PLT_HOOK(__system_property_get);
+    PLT_HOOK(readlink);
+    PLT_HOOK(readlinkat);
+    PLT_HOOK(ptrace);
+    PLT_HOOK(getenv);
+    PLT_HOOK(secure_getenv);
+    PLT_HOOK(kill);
+}
+
+#undef PLT_HOOK
+
+// ============================================================
+// 导出 hook 函数——PLT interposition 通过同名函数覆盖
+// ============================================================
 extern "C" {
 
-FILE* fopen(const char *pathname, const char *mode) {
-    if (!is_target) return orig_fopen(pathname, mode);
-    return hooked_fopen(pathname, mode);
+FILE* fopen(const char* path, const char* mode) {
+    if (!is_target || !orig_fopen) return orig_fopen(path, mode);
+    return hook_fopen(path, mode);
 }
 
-FILE* popen(const char *command, const char *type) {
-    if (!is_target) return orig_popen(command, type);
-    return hooked_popen(command, type);
-}
-
-int stat(const char *pathname, struct stat *buf) {
-    if (!is_target) return orig_stat(pathname, buf);
-    return hooked_stat(pathname, buf);
-}
-
-__attribute__((visibility("default")))
-int lstat(const char *pathname, struct stat *buf) {
-    if (!is_target) return orig_lstat(pathname, buf);
-    return hooked_lstat(pathname, buf);
-}
-
-int access(const char *pathname, int mode) {
-    if (!is_target) return orig_access(pathname, mode);
-    return hooked_access(pathname, mode);
-}
-
-int faccessat(int dirfd, const char *pathname, int mode, int flags) {
-    if (!is_target) return orig_faccessat(dirfd, pathname, mode, flags);
-    return hooked_faccessat(dirfd, pathname, mode, flags);
-}
-
-int open(const char *pathname, int flags, ...) {
-    if (!is_target) {
-        va_list ap;
-        va_start(ap, flags);
-        int mode = va_arg(ap, int);
-        va_end(ap);
-        return orig_open(pathname, flags, mode);
+int open(const char* path, int flags, ...) {
+    if (!is_target || !orig_open) {
+        va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+        return orig_open(path, flags, m);
     }
-    va_list ap;
-    va_start(ap, flags);
-    int mode = va_arg(ap, int);
-    va_end(ap);
-    return hooked_open(pathname, flags, mode);
+    va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+    // 直接调 hook，hook 内部使用可变参数已无法获取 mode，所以在 hook 入口重新获取
+    if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_open(path, flags, m);
 }
 
-DIR* opendir(const char *name) {
-    if (!is_target) return orig_opendir(name);
-    return hooked_opendir(name);
+int open64(const char* path, int flags, ...) {
+    if (!is_target || !orig_open64) {
+        va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+        return orig_open64(path, flags, m);
+    }
+    va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+    if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return orig_open64(path, flags, m);
 }
 
-int __system_property_get(const char *name, char *value) {
-    if (!is_target) return orig_system_property_get(name, value);
-    return hooked_system_property_get(name, value);
+int __open_2(const char* path, int flags) {
+    if (!is_target || !orig___open_2) return orig___open_2(path, flags);
+    return hook___open_2(path, flags);
+}
+
+int stat(const char* path, struct stat* buf) {
+    if (!is_target || !orig_stat) return orig_stat(path, buf);
+    return hook_stat(path, buf);
+}
+
+int lstat(const char* path, struct stat* buf) {
+    if (!is_target || !orig_lstat) return orig_lstat(path, buf);
+    return hook_lstat(path, buf);
+}
+
+int fstatat(int dirfd, const char* path, struct stat* buf, int flags) {
+    if (!is_target || !orig_fstatat) return orig_fstatat(dirfd, path, buf, flags);
+    return hook_fstatat(dirfd, path, buf, flags);
+}
+
+int __lxstat(int ver, const char* path, struct stat* buf) {
+    if (!is_target || !orig___lxstat) return orig___lxstat(ver, path, buf);
+    return hook___lxstat(ver, path, buf);
+}
+
+int __xstat(int ver, const char* path, struct stat* buf) {
+    if (!is_target || !orig___xstat) return orig___xstat(ver, path, buf);
+    return hook___xstat(ver, path, buf);
+}
+
+int access(const char* path, int mode) {
+    if (!is_target || !orig_access) return orig_access(path, mode);
+    return hook_access(path, mode);
+}
+
+int faccessat(int dirfd, const char* path, int mode, int flags) {
+    if (!is_target || !orig_faccessat) return orig_faccessat(dirfd, path, mode, flags);
+    return hook_faccessat(dirfd, path, mode, flags);
+}
+
+DIR* opendir(const char* path) {
+    if (!is_target || !orig_opendir) return orig_opendir(path);
+    return hook_opendir(path);
+}
+
+DIR* fdopendir(int fd) {
+    if (!is_target || !orig_fdopendir) return orig_fdopendir(fd);
+    return hook_fdopendir(fd);
+}
+
+FILE* popen(const char* cmd, const char* type) {
+    if (!is_target || !orig_popen) return orig_popen(cmd, type);
+    return hook_popen(cmd, type);
+}
+
+int system(const char* cmd) {
+    if (!is_target || !orig_system) return orig_system(cmd);
+    return hook_system(cmd);
+}
+
+int __system_property_get(const char* name, char* value) {
+    if (!is_target || !orig___system_property_get) return orig___system_property_get(name, value);
+    return hook___system_property_get(name, value);
+}
+
+ssize_t readlink(const char* path, char* buf, size_t bufsiz) {
+    if (!is_target || !orig_readlink) return orig_readlink(path, buf, bufsiz);
+    return hook_readlink(path, buf, bufsiz);
+}
+
+ssize_t readlinkat(int dirfd, const char* path, char* buf, size_t bufsiz) {
+    if (!is_target || !orig_readlinkat) return orig_readlinkat(dirfd, path, buf, bufsiz);
+    return hook_readlinkat(dirfd, path, buf, bufsiz);
+}
+
+long ptrace(int request, pid_t pid, void* addr, void* data) {
+    if (!is_target || !orig_ptrace) return orig_ptrace(request, pid, addr, data);
+    return hook_ptrace(request, pid, addr, data);
+}
+
+char* getenv(const char* name) {
+    if (!is_target || !orig_getenv) return orig_getenv(name);
+    return hook_getenv(name);
+}
+
+char* secure_getenv(const char* name) {
+    if (!is_target || !orig_secure_getenv) return orig_secure_getenv(name);
+    return hook_secure_getenv(name);
+}
+
+int kill(pid_t pid, int sig) {
+    if (!is_target || !orig_kill) return orig_kill(pid, sig);
+    return hook_kill(pid, sig);
 }
 
 } // extern "C"

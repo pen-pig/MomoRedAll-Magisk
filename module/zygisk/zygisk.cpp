@@ -420,18 +420,11 @@ int hooked_system_property_get(const char *name, char *value) {
 
 __attribute__((constructor))
 static void init_hooks() {
-    // 第一步：用原始函数读进程名，非目标进程立即退出
+    // 第一步：用原始函数读进程名
     is_target = check_target_process();
-    if (!is_target) {
-        LOGD("Not a target process (%s), skipping all hooks", "self");
-        // orig_* 指针保持 nullptr，PLT wrapper 会在首次调用时懒加载并透传
-        return;
-    }
     
-    LOGD("Target process detected, installing hooks");
-    init_fake_cmds();
-    
-    // 保存其余原始函数（open/read/close 已在 check_target_process 中解析）
+    // 无论是否目标进程，都解析所有原始函数指针（消除竞态窗口）
+    // open/read/close 已在 check_target_process 中解析
     orig_fopen = (decltype(orig_fopen))dlsym(RTLD_NEXT, "fopen");
     orig_popen = (decltype(orig_popen))dlsym(RTLD_NEXT, "popen");
     orig_stat = (decltype(orig_stat))dlsym(RTLD_NEXT, "stat");
@@ -443,6 +436,13 @@ static void init_hooks() {
     orig_readdir = (decltype(orig_readdir))dlsym(RTLD_NEXT, "readdir");
     orig_system_property_get = (decltype(orig_system_property_get))dlsym(RTLD_NEXT, "__system_property_get");
     
+    if (!is_target) {
+        LOGD("Not a target process, orig_* pointers resolved for zero-overhead pass-through");
+        return;
+    }
+    
+    LOGD("Target process detected, installing fake data");
+    init_fake_cmds();
     LOGD("Zygisk hooks initialized");
 }
 
@@ -460,52 +460,58 @@ extern "C" void zygisk_entry(void *reserved) {
 extern "C" {
 
 FILE* fopen(const char *pathname, const char *mode) {
-    if (!orig_fopen) orig_fopen = (decltype(orig_fopen))dlsym(RTLD_NEXT, "fopen");
+    if (!is_target) return orig_fopen(pathname, mode);
     return hooked_fopen(pathname, mode);
 }
 
 FILE* popen(const char *command, const char *type) {
-    if (!orig_popen) orig_popen = (decltype(orig_popen))dlsym(RTLD_NEXT, "popen");
+    if (!is_target) return orig_popen(command, type);
     return hooked_popen(command, type);
 }
 
 int stat(const char *pathname, struct stat *buf) {
-    if (!orig_stat) orig_stat = (decltype(orig_stat))dlsym(RTLD_NEXT, "stat");
+    if (!is_target) return orig_stat(pathname, buf);
     return hooked_stat(pathname, buf);
 }
 
 __attribute__((visibility("default")))
 int lstat(const char *pathname, struct stat *buf) {
-    if (!orig_lstat) orig_lstat = (decltype(orig_lstat))dlsym(RTLD_NEXT, "lstat");
+    if (!is_target) return orig_lstat(pathname, buf);
     return hooked_lstat(pathname, buf);
 }
 
 int access(const char *pathname, int mode) {
-    if (!orig_access) orig_access = (decltype(orig_access))dlsym(RTLD_NEXT, "access");
+    if (!is_target) return orig_access(pathname, mode);
     return hooked_access(pathname, mode);
 }
 
 int faccessat(int dirfd, const char *pathname, int mode, int flags) {
-    if (!orig_faccessat) orig_faccessat = (decltype(orig_faccessat))dlsym(RTLD_NEXT, "faccessat");
+    if (!is_target) return orig_faccessat(dirfd, pathname, mode, flags);
     return hooked_faccessat(dirfd, pathname, mode, flags);
 }
 
 int open(const char *pathname, int flags, ...) {
-    if (!orig_open) orig_open = (decltype(orig_open))dlsym(RTLD_NEXT, "open");
+    if (!is_target) {
+        va_list ap;
+        va_start(ap, flags);
+        int mode = va_arg(ap, int);
+        va_end(ap);
+        return orig_open(pathname, flags, mode);
+    }
     va_list ap;
     va_start(ap, flags);
     int mode = va_arg(ap, int);
     va_end(ap);
-    if (!is_target || !pathname) return orig_open(pathname, flags, mode);
     return hooked_open(pathname, flags, mode);
 }
 
 DIR* opendir(const char *name) {
-    if (!orig_opendir) orig_opendir = (decltype(orig_opendir))dlsym(RTLD_NEXT, "opendir");
+    if (!is_target) return orig_opendir(name);
     return hooked_opendir(name);
 }
 
 int __system_property_get(const char *name, char *value) {
+    if (!is_target) return orig_system_property_get(name, value);
     return hooked_system_property_get(name, value);
 }
 

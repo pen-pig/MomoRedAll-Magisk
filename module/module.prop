@@ -1,0 +1,6 @@
+id=MomoRedAll-Native
+name=MomoRedAll (Native Hook)
+version=v1.0
+versionCode=1
+author=pen-pig
+description=Zygisk模块：Native层全量伪造系统调用，让Momo检测全面红色告警。Hook fopen/popen/stat/system_property_get等。

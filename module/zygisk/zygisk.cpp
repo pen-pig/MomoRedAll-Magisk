@@ -74,6 +74,7 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <sys/ptrace.h>
+#include <sys/syscall.h>
 #include <dirent.h>
 #include <link.h>
 
@@ -270,7 +271,7 @@ static int (*orig_system)(const char*) = nullptr;
 static int (*orig___system_property_get)(const char*, char*) = nullptr;
 static ssize_t (*orig_readlink)(const char*, char*, size_t) = nullptr;
 static ssize_t (*orig_readlinkat)(int, const char*, char*, size_t) = nullptr;
-static long (*orig_ptrace)(int, pid_t, void*, void*) = nullptr;
+static long (*orig_ptrace)(int, ...) = nullptr;
 static char* (*orig_getenv)(const char*) = nullptr;
 static char* (*orig_secure_getenv)(const char*) = nullptr;
 static int (*orig_kill)(pid_t, int) = nullptr;
@@ -368,12 +369,12 @@ static int hook_open(const char* path, int flags, ...) {
             return -1;
         }
     }
-    // 处理可变参数 mode
+    // 处理可变参数 mode（mode_t 在 variadic 中被提升为 int）
     va_list args;
     va_start(args, flags);
-    mode_t mode = va_arg(args, mode_t);
+    unsigned int mode = va_arg(args, unsigned int);
     va_end(args);
-    return orig_open(path, flags, mode);
+    return orig_open(path, flags, (mode_t)mode);
 }
 
 static int hook_open64(const char* path, int flags, ...) {
@@ -385,9 +386,9 @@ static int hook_open64(const char* path, int flags, ...) {
     }
     va_list args;
     va_start(args, flags);
-    mode_t mode = va_arg(args, mode_t);
+    unsigned int mode = va_arg(args, unsigned int);
     va_end(args);
-    return orig_open64(path, flags, mode);
+    return orig_open64(path, flags, (mode_t)mode);
 }
 
 static int hook___open_2(const char* path, int flags) {
@@ -567,7 +568,7 @@ static ssize_t hook_readlinkat(int dirfd, const char* path, char* buf, size_t bu
 // ptrace hook — 拦截 Zygisk fork 检测
 // DetectZ / Hunter 等通过 ptrace 检测 Zygisk 进程
 // ============================================================
-static long hook_ptrace(int request, pid_t pid, void* addr, void* data) {
+static long hook_ptrace(int request, va_list args) {
     if (is_target) {
         // 阻止所有 ptrace 请求（包括 PTRACE_TRACEME / PTRACE_ATTACH）
         // 这会阻断 DetectZ 的 ptrace-based Zygisk fork 检测
@@ -575,7 +576,15 @@ static long hook_ptrace(int request, pid_t pid, void* addr, void* data) {
         errno = EPERM;
         return -1;
     }
-    return orig_ptrace(request, pid, addr, data);
+    // 转发到原始 ptrace，需要消费 va_list
+    // bionic 的 ptrace 签名: long ptrace(int __op, ...)
+    // 常见调用: ptrace(PTRACE_ATTACH, pid, NULL, NULL)
+    // 我们无法在 C 中完美转发 va_list，所以直接调用 orig_ptrace
+    // 但 variadic 不能和 va_list 互转... 
+    // 方案：使用 syscall() 绕过，因为 ptrace 本质是 syscall
+    return syscall(__NR_ptrace, request, va_arg(args, pid_t), va_arg(args, void*), va_arg(args, void*));
+    // 注意：上面的 syscall 方案在 is_target=true 时不会走到，
+    // 只在非目标进程时消费 args 并转发
 }
 
 // ============================================================
@@ -667,29 +676,29 @@ FILE* fopen(const char* path, const char* mode) {
 
 int open(const char* path, int flags, ...) {
     if (!is_target || !orig_open) {
-        va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
-        return orig_open(path, flags, m);
+        va_list a; va_start(a, flags); unsigned int m = va_arg(a, unsigned int); va_end(a);
+        return orig_open(path, flags, (mode_t)m);
     }
-    va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+    va_list a; va_start(a, flags); unsigned int m = va_arg(a, unsigned int); va_end(a);
     // 直接调 hook，hook 内部使用可变参数已无法获取 mode，所以在 hook 入口重新获取
     if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
         errno = ENOENT;
         return -1;
     }
-    return orig_open(path, flags, m);
+    return orig_open(path, flags, (mode_t)m);
 }
 
 int open64(const char* path, int flags, ...) {
     if (!is_target || !orig_open64) {
-        va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
-        return orig_open64(path, flags, m);
+        va_list a; va_start(a, flags); unsigned int m = va_arg(a, unsigned int); va_end(a);
+        return orig_open64(path, flags, (mode_t)m);
     }
-    va_list a; va_start(a, flags); mode_t m = va_arg(a, mode_t); va_end(a);
+    va_list a; va_start(a, flags); unsigned int m = va_arg(a, unsigned int); va_end(a);
     if (path_contains_keyword(path) || path_is_proc_self(path) || path_is_proc_mounts(path)) {
         errno = ENOENT;
         return -1;
     }
-    return orig_open64(path, flags, m);
+    return orig_open64(path, flags, (mode_t)m);
 }
 
 int __open_2(const char* path, int flags) {
@@ -767,9 +776,19 @@ ssize_t readlinkat(int dirfd, const char* path, char* buf, size_t bufsiz) {
     return hook_readlinkat(dirfd, path, buf, bufsiz);
 }
 
-long ptrace(int request, pid_t pid, void* addr, void* data) {
-    if (!is_target || !orig_ptrace) return orig_ptrace(request, pid, addr, data);
-    return hook_ptrace(request, pid, addr, data);
+long ptrace(int request, ...) {
+    va_list args;
+    va_start(args, request);
+    if (!is_target || !orig_ptrace) {
+        pid_t pid = va_arg(args, pid_t);
+        void* addr = va_arg(args, void*);
+        void* data = va_arg(args, void*);
+        va_end(args);
+        return orig_ptrace(request, pid, addr, data);
+    }
+    long ret = hook_ptrace(request, args);
+    va_end(args);
+    return ret;
 }
 
 char* getenv(const char* name) {

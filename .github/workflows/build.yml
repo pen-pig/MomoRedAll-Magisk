@@ -1,0 +1,86 @@
+name: Build Zygisk Module
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r27c" >> $GITHUB_ENV
+
+      - name: Determine ABI
+        id: abi
+        run: |
+          case "${{ matrix.arch }}" in
+            arm64-v8a)   echo "target=aarch64-linux-android21" >> $GITHUB_OUTPUT ;;
+            armeabi-v7a) echo "target=armv7a-linux-androideabi21" >> $GITHUB_OUTPUT ;;
+            x86_64)      echo "target=x86_64-linux-android21" >> $GITHUB_OUTPUT ;;
+            x86)         echo "target=i686-linux-android21" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Setup NDK standalone toolchain
+        run: |
+          $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py \
+            --arch ${{ matrix.arch == 'arm64-v8a' && 'arm64' || matrix.arch == 'armeabi-v7a' && 'arm' || matrix.arch == 'x86_64' && 'x86_64' || 'x86' }} \
+            --api 21 --install-dir toolchain
+
+      - name: Compile Zygisk Module
+        run: |
+          export PATH=$PWD/toolchain/bin:$PATH
+          ${{ steps.abi.outputs.target }}-clang++ \
+            -shared -fPIC -O2 -s \
+            -o zygisk_${{ matrix.arch }}.so \
+            module/zygisk/zygisk.cpp \
+            -llog -ldl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zygisk-${{ matrix.arch }}
+          path: zygisk_${{ matrix.arch }}.so
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: zygisk-*
+          merge-multiple: true
+          path: libs
+
+      - name: Organize libs
+        run: |
+          mkdir -p module/zygisk/libs/arm64-v8a \
+                   module/zygisk/libs/armeabi-v7a \
+                   module/zygisk/libs/x86_64 \
+                   module/zygisk/libs/x86
+          mv libs/zygisk_arm64-v8a.so module/zygisk/libs/arm64-v8a/zygisk.so
+          mv libs/zygisk_armeabi-v7a.so module/zygisk/libs/armeabi-v7a/zygisk.so
+          mv libs/zygisk_x86_64.so module/zygisk/libs/x86_64/zygisk.so
+          mv libs/zygisk_x86.so module/zygisk/libs/x86/zygisk.so
+
+      - name: Package Magisk Module
+        run: |
+          cd module
+          zip -r ../MomoRedAll-Magisk-v1.0.zip .
+          
+      - name: Upload Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: MomoRedAll-Magisk-v1.0
+          path: MomoRedAll-Magisk-v1.0.zip

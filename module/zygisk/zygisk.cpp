@@ -210,6 +210,27 @@ static int (*orig_open)(const char*, int, ...) = nullptr;
 static DIR* (*orig_opendir)(const char*) = nullptr;
 static struct dirent* (*orig_readdir)(DIR*) = nullptr;
 static ssize_t (*orig_read)(int, void*, size_t) = nullptr;
+static int (*orig_close)(int) = nullptr;
+
+// ====== 在构造函数中用原始函数读进程名，避免 PLT 循环 ======
+static bool check_target_process() {
+    // 用 dlsym 拿原始函数，不走 PLT interposition
+    if (!orig_open)  orig_open  = (decltype(orig_open)) dlsym(RTLD_NEXT, "open");
+    if (!orig_read)  orig_read  = (decltype(orig_read)) dlsym(RTLD_NEXT, "read");
+    if (!orig_close) orig_close = (decltype(orig_close))dlsym(RTLD_NEXT, "close");
+    
+    char cmdline[256] = {0};
+    int fd = orig_open("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return false;
+    ssize_t n = orig_read(fd, cmdline, sizeof(cmdline) - 1);
+    orig_close(fd);
+    if (n <= 0) return false;
+    
+    for (int i = 0; TARGETS[i]; i++) {
+        if (strstr(cmdline, TARGETS[i])) return true;
+    }
+    return false;
+}
 
 // ====== 判断路径是否在诱饵列表中 ======
 static bool match_path(const char *path, const char **list) {
@@ -379,9 +400,18 @@ DIR* hooked_opendir(const char *name) {
 
 __attribute__((constructor))
 static void init_hooks() {
+    // 第一步：用原始函数读进程名，非目标进程立即退出
+    is_target = check_target_process();
+    if (!is_target) {
+        LOGD("Not a target process (%s), skipping all hooks", "self");
+        // orig_* 指针保持 nullptr，PLT wrapper 会在首次调用时懒加载并透传
+        return;
+    }
+    
+    LOGD("Target process detected, installing hooks");
     init_fake_cmds();
     
-    // 保存原始函数
+    // 保存其余原始函数（open/read/close 已在 check_target_process 中解析）
     orig_fopen = (decltype(orig_fopen))dlsym(RTLD_NEXT, "fopen");
     orig_popen = (decltype(orig_popen))dlsym(RTLD_NEXT, "popen");
     orig_stat = (decltype(orig_stat))dlsym(RTLD_NEXT, "stat");
@@ -389,7 +419,6 @@ static void init_hooks() {
     orig_fstatat = (decltype(orig_fstatat))dlsym(RTLD_NEXT, "__fxstatat");
     orig_access = (decltype(orig_access))dlsym(RTLD_NEXT, "access");
     orig_faccessat = (decltype(orig_faccessat))dlsym(RTLD_NEXT, "faccessat");
-    orig_open = (decltype(orig_open))dlsym(RTLD_NEXT, "open");
     orig_opendir = (decltype(orig_opendir))dlsym(RTLD_NEXT, "opendir");
     orig_readdir = (decltype(orig_readdir))dlsym(RTLD_NEXT, "readdir");
     

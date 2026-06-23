@@ -189,6 +189,15 @@ static const char *FAKE_ATTR_CURRENT = "u:r:magisk:s0\n";
 static const char *FAKE_SELINUX_ENFORCE = "0";
 static const char *FAKE_NET_TCP = "   0: 00000000:69A2 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n";
 
+// ====== fmemopen 替代 (NDK 不包含 fmemopen) ======
+static FILE* fake_fopen(const char *data, size_t len, const char *mode) {
+    int fds[2];
+    if (pipe(fds) != 0) return nullptr;
+    (void)!write(fds[1], data, len);
+    close(fds[1]);
+    return fdopen(fds[0], mode);
+}
+
 // ====== 原始函数指针 ======
 static FILE* (*orig_fopen)(const char*, const char*) = nullptr;
 static FILE* (*orig_popen)(const char*, const char*) = nullptr;
@@ -226,25 +235,25 @@ FILE* hooked_fopen(const char *pathname, const char *mode) {
     if (!is_target || !pathname) return orig_fopen(pathname, mode);
     
     if (strcmp(pathname, "/proc/self/maps") == 0) {
-        return fmemopen((void*)FAKE_MAPS, strlen(FAKE_MAPS), mode);
+        return fake_fopen(FAKE_MAPS, strlen(FAKE_MAPS), mode);
     }
     if (strcmp(pathname, "/proc/self/status") == 0) {
-        return fmemopen((void*)FAKE_STATUS, strlen(FAKE_STATUS), mode);
+        return fake_fopen(FAKE_STATUS, strlen(FAKE_STATUS), mode);
     }
     if (strcmp(pathname, "/proc/self/mounts") == 0) {
-        return fmemopen((void*)FAKE_MOUNTS, strlen(FAKE_MOUNTS), mode);
+        return fake_fopen(FAKE_MOUNTS, strlen(FAKE_MOUNTS), mode);
     }
     if (strcmp(pathname, "/proc/self/wchan") == 0) {
-        return fmemopen((void*)FAKE_WCHAN, strlen(FAKE_WCHAN), mode);
+        return fake_fopen(FAKE_WCHAN, strlen(FAKE_WCHAN), mode);
     }
     if (strcmp(pathname, "/proc/self/attr/current") == 0) {
-        return fmemopen((void*)FAKE_ATTR_CURRENT, strlen(FAKE_ATTR_CURRENT), mode);
+        return fake_fopen(FAKE_ATTR_CURRENT, strlen(FAKE_ATTR_CURRENT), mode);
     }
     if (strcmp(pathname, "/sys/fs/selinux/enforce") == 0) {
-        return fmemopen((void*)FAKE_SELINUX_ENFORCE, strlen(FAKE_SELINUX_ENFORCE), mode);
+        return fake_fopen(FAKE_SELINUX_ENFORCE, strlen(FAKE_SELINUX_ENFORCE), mode);
     }
     if (strcmp(pathname, "/proc/net/tcp") == 0) {
-        return fmemopen((void*)FAKE_NET_TCP, strlen(FAKE_NET_TCP), mode);
+        return fake_fopen(FAKE_NET_TCP, strlen(FAKE_NET_TCP), mode);
     }
     
     return orig_fopen(pathname, mode);
@@ -256,13 +265,13 @@ FILE* hooked_popen(const char *command, const char *type) {
     
     for (auto &it : FAKE_CMDS) {
         if (strstr(command, it.first.c_str())) {
-            return fmemopen((void*)it.second.c_str(), it.second.size(), type);
+            return fake_fopen(it.second.c_str(), it.second.size(), type);
         }
     }
     
     // su 命令
     if (strstr(command, "su")) {
-        return fmemopen((void*)"uid=0(root)\n", 12, type);
+        return fake_fopen("uid=0(root)\n", 12, type);
     }
     
     return orig_popen(command, type);

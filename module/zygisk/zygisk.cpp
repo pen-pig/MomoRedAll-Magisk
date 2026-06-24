@@ -1,20 +1,25 @@
 /*
- * MomoRedAll-Magisk v3.0 — 爆红版
- * ==================================
+ * MomoRedAll-Magisk v3.1 — 爆红版（全面覆盖）
+ * ============================================
  * 核心哲学反转：不再隐藏 Root 痕迹，而是主动注入脏数据，
  * 让所有检测器确认"此环境已被修改"（爆红）。
  *
- * 覆盖检测器（12+）：
+ * 覆盖检测器（16+）：
  *   Momo, NativeTest, Applist Detector, Ruru, Detect Magisk Hide,
  *   Momo Strong, SafetyNet, Cat and Mouse, Android CTS,
- *   RootBeer, RootBeer Fresh, Key Attestation
+ *   RootBeer, RootBeer Fresh, Key Attestation,
+ *   Native Root Detector (reveny), CrackME (GarudaDefender),
+ *   APTest (APatch), JingMatrix Demo
  *
- * v3.0 重大变更（对比 v2.x）：
- *   - 删除所有文件路径拦截（不再返回 ENOENT/nullptr）
- *   - 新增 /proc/self/* 内容注入（memfd 替换）
- *   - 系统属性返回明确脏值（而非空串）
- *   - Shell 命令返回伪造后门/root 输出
- *   - ptrace/getenv/readlink 保持不变（对抗 + 注入）
+ * v3.1 新增（对比 v3.0）：
+ *   - 整合 MagiskDetection 仓库全部检测向量
+ *   - 新增 Native Root Detector 全量检测对抗（bootloader/OEM/Keybox/TEE 等）
+ *   - 新增 APatch 检测对抗（属性注入 + 文件暴露）
+ *   - 新增 CrackME/GarudaDefender 对抗（调试器/模拟器/内存补丁检测）
+ *   - 新增 JingMatrix soinfo/virtual maps 检测对抗
+ *   - 扩展 Shell 命令注入（resetprop/pm list/sestatus）
+ *   - 扩展 /proc 注入（sched/oom_score_adj/task/status）
+ *   - 新增 4 个目标检测器进程
  */
 
 #include <string>
@@ -37,7 +42,7 @@
 #define CONFIG_PATH "/data/adb/modules/MomoRedAll-Native/config.json"
 
 static bool config_loaded = false;
-static bool config_enabled[12] = {true};
+static bool config_enabled[16] = {true};
 static bool config_hooks[13] = {true};
 
 static void load_config() {
@@ -45,7 +50,7 @@ static void load_config() {
     config_loaded = true;
     std::ifstream f(CONFIG_PATH);
     if (!f.is_open()) {
-        for (int i = 0; i < 12; i++) config_enabled[i] = true;
+        for (int i = 0; i < 16; i++) config_enabled[i] = true;
         for (int i = 0; i < 13; i++) config_hooks[i] = true;
         return;
     }
@@ -54,9 +59,10 @@ static void load_config() {
     const char* target_keys[] = {
         "momo", "native_test", "applist_detector", "ruru", "detect_magisk_hide",
         "momo_strong", "safetynet", "safetynet_playstore", "cat_and_mouse",
-        "android_cts", "rootbeer", "rootbeer_fresh"
+        "android_cts", "rootbeer", "rootbeer_fresh",
+        "native_root_detector", "crackme", "aptest", "rootbeer_sample"  // v3.1
     };
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < 16; i++) {
         std::string key = "\"" + std::string(target_keys[i]) + "\":";
         size_t pos = content.find(key);
         if (pos != std::string::npos) {
@@ -93,26 +99,31 @@ static bool is_hook_enabled(int hook_index) {
 // 目标进程包名列表
 // ============================================================
 static const char* TARGET_PROCESSES[] = {
-    "io.github.vvb2060.mahoshojo",
-    "io.github.vvb2060.magiskdetector",
-    "icu.nullptr.nativetest",
-    "com.byxiaorun.detector",
-    "com.zhenxi.hunter",
-    "com.godevelopers.OprekCek",
-    "com.ysh.hookapkverify",
-    "com.test.detectz",
-    "io.github.vvb2060.keyattestation",
-    "duckduckgo.mobile.android",
-    "org.lsposed.dirtysepolicy",
-    "com.darvin.security",
+    "io.github.vvb2060.mahoshojo",       // Momo
+    "io.github.vvb2060.magiskdetector",  // Magisk Detector
+    "icu.nullptr.nativetest",            // NativeTest / MinotaurPoc
+    "com.byxiaorun.detector",            // Ruru
+    "com.zhenxi.hunter",                 // Hunter
+    "com.godevelopers.OprekCek",         // Oprek Detector
+    "com.ysh.hookapkverify",             // SafeCheck
+    "com.test.detectz",                  // DetectZ
+    "io.github.vvb2060.keyattestation",  // Key Attestation
+    "duckduckgo.mobile.android",         // DuckDetector
+    "org.lsposed.dirtysepolicy",         // DirtySepolicy
+    "com.darvin.security",               // Detect Magisk
+    "com.reveny.nativecheck",            // Native Root Detector (v3.1)
+    "com.kikyps.crackme",                // CrackME / GarudaDefender (v3.1)
+    "me.garfieldhan.hiapatch",           // APTest / APatch (v3.1)
+    "com.scottyab.rootbeer.sample",      // Rootbeer Sample (v3.1)
 };
 static const int TARGET_COUNT = sizeof(TARGET_PROCESSES) / sizeof(TARGET_PROCESSES[0]);
 static bool is_target = false;
 
 // ============================================================
-// 脏属性表（v3.0：返回明确脏值）
+// 脏属性表（v3.1：扩展至 55+ 属性，覆盖 Native Root Detector + APatch + GarudaDefender 检测）
 // ============================================================
 static const char* DIRTY_PROPS[][2] = {
+    // --- 调试 / 安全状态 ---
     {"ro.debuggable", "1"},
     {"ro.secure", "0"},
     {"ro.build.type", "userdebug"},
@@ -120,39 +131,67 @@ static const char* DIRTY_PROPS[][2] = {
     {"ro.build.selinux", "0"},
     {"ro.build.flavor", "userdebug"},
     {"ro.build.characteristics", "default"},
-    {"ro.build.version.security_patch", "2023-12-01"},
+    {"ro.build.version.security_patch", "2019-01-01"},      // v3.1: 极老补丁日期
+    {"ro.build.description", "marlin-userdebug 7.1.2 NJH47F 4146041 test-keys"},
+    // --- Bootloader / Verified Boot (Native Root Detector) ---
     {"ro.boot.verifiedbootstate", "orange"},
     {"ro.boot.flash.locked", "0"},
     {"ro.boot.vbmeta.device_state", "unlocked"},
+    {"ro.boot.vbmeta.digest", "0000000000000000000000000000000000000000000000000000000000000000"}, // v3.1
+    {"ro.boot.vbmeta.size", "0"},                            // v3.1
     {"ro.boot.selinux", "permissive"},
     {"ro.boot.veritymode", "disabled"},
+    {"ro.bootimage.build.fingerprint", "google/marlin/marlin:7.1.2/NJH47F/4146041:userdebug/test-keys"}, // v3.1
+    {"ro.vendor.build.fingerprint", "google/marlin/marlin:7.1.2/NJH47F/4146041:userdebug/test-keys"},    // v3.1
+    {"ro.odm.build.fingerprint", "google/marlin/marlin:7.1.2/NJH47F/4146041:userdebug/test-keys"},       // v3.1
+    // --- OEM Unlock (Native Root Detector) ---
+    {"ro.oem_unlock_supported", "1"},                        // v3.1
+    {"sys.oem_unlock_allowed", "1"},                         // v3.1
+    // --- ADB / USB ---
     {"init.svc.adbd", "running"},
     {"persist.sys.usb.config", "adb,mtp"},
     {"sys.usb.config", "adb"},
     {"sys.usb.state", "adb"},
     {"ro.adb.secure", "0"},
+    // --- Magisk ---
     {"ro.magisk.version", "27000"},
     {"ro.magisk.hide", "1"},
     {"ro.dalvik.vm.native.bridge", "libriruloader.so"},
     {"init.svc.magisk_pfs", "running"},
     {"init.svc.magisk_service", "running"},
     {"persist.magisk", "1"},
+    // --- APatch (v3.1 新增) ---
+    {"ro.apatch.version", "11111"},                          // v3.1
+    {"ro.boot.apatch", "1"},                                 // v3.1
+    {"persist.apatch.version", "11111"},                     // v3.1
+    // --- KernelSU ---
+    {"ro.kernel.version", "KernelSU"},                       // v3.1
+    {"ro.kernelsu.version", "11872"},                        // v3.1
+    // --- KeyStore / TEE (v3.1: 标记 TEE 已损坏) ---
     {"ro.hardware.keystore", "software"},
     {"ro.hardware.keystore_desede", "software"},
-    {"ro.build.selinux.enforce", "1"},
-    {"persist.sys.selinux.enforce", "0"},
     {"ro.crypto.state", "unencrypted"},
     {"ro.crypto.type", "none"},
+    {"keymaster.tee.broken", "true"},                        // v3.1
+    {"keystore.broken", "true"},                             // v3.1
+    // --- SELinux ---
+    {"ro.build.selinux.enforce", "1"},
+    {"persist.sys.selinux.enforce", "0"},
+    // --- Custom ROM (LineageOS / CM) ---
     {"ro.modversion", "LineageOS-20-20240101"},
     {"ro.lineage.version", "20.0"},
     {"ro.cm.version", "14.1"},
+    // --- 模拟器 / 虚拟环境 ---
     {"ro.product.cpu.abi", "x86"},
     {"ro.product.cpu.abi2", "armeabi-v7a"},
     {"ro.kernel.qemu", "1"},
+    // --- 调试 / Mock ---
     {"dalvik.vm.checkjni", "true"},
     {"ro.allow.mock.location", "1"},
     {"ro.monkey", "1"},
+    {"ro.kernel.android.checkjni", "1"},                     // v3.1
     {"dalvik.vm.dex2oat-filter", "verify-none"},
+    // --- 综合指纹 ---
     {"ro.build.fingerprint", "google/marlin/marlin:7.1.2/NJH47F/4146041:userdebug/test-keys"},
     {nullptr, nullptr}
 };
@@ -256,6 +295,43 @@ static const char* FAKE_NET_TCP6 =
 "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
 "   0: 00000000000000000000000000000000:69A2 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12347 1 0000000000000000 100 0 0 10 0\n";
 
+// v3.1 新增伪造内容 =============================================
+static const char* FAKE_SCHED =
+"magisk.bin (31337, #threads: 3)\n"
+"--------------------------------------------------------------------\n"
+"se.exec_start                                :     12345.678901\n"
+"se.vruntime                                  :         3.141592\n"
+"se.sum_exec_runtime                          :      9999.999999\n"
+"se.nr_migrations                             :               313\n"
+"nr_switches                                  :            99999\n"
+"nr_voluntary_switches                        :            50000\n"
+"nr_involuntary_switches                      :            49999\n"
+"se.load.weight                               :             1024\n"
+"se.avg.load_sum                              :         1234567\n"
+"se.avg.runnable_sum                          :          456789\n"
+"se.avg.util_sum                              :          234567\n"
+"se.avg.last_update_time                      :     123456789012345\n"
+"policy                                       :                 0\n"
+"prio                                         :               120\n"
+"clock-delta                                  :               123\n";
+
+static const char* FAKE_OOM_SCORE_ADJ = "-1000\n";  // v3.1: 系统关键进程, 不会被 kill
+
+// v3.1: 用于 /proc/self/task/*/status 通配替换
+static const char* FAKE_TASK_STATUS =
+"Name:   magisk.bin\n"
+"Umask:  0077\n"
+"State:  S (sleeping)\n"
+"Tgid:   31337\n"
+"Ngid:   0\n"
+"Pid:    31337\n"
+"PPid:   1\n"
+"TracerPid:\t9999\n"
+"Uid:\t0\t0\t0\t0\n"
+"Gid:\t0\t0\t0\t0\n"
+"FDSize:\t256\n"
+"Groups:\t0 1004 1007 1011 1015 1028 3001 3002 3003 3006 3009 3011\n";
+
 // ============================================================
 // Shell 命令伪造输出
 // ============================================================
@@ -310,6 +386,50 @@ static const char* FAKE_NETSTAT_OUTPUT =
 "tcp        0      0 0.0.0.0:27042           0.0.0.0:*               LISTEN      11111/frida-server\n"
 "tcp        0      0 127.0.0.1:5555           0.0.0.0:*               LISTEN      1234/magiskd\n"
 "tcp        0      0 0.0.0.0:27043           0.0.0.0:*               LISTEN      11111/frida-server\n";
+
+// v3.1 新增 Shell 伪造输出 =====================================
+static const char* FAKE_RESETPROP_OUTPUT =
+"[ro.debuggable]: [1]\n"
+"[ro.secure]: [0]\n"
+"[ro.magisk.version]: [27000]\n"
+"[ro.boot.verifiedbootstate]: [orange]\n"
+"[ro.boot.flash.locked]: [0]\n";
+
+static const char* FAKE_PM_LIST_ROOT_OUTPUT =
+"package:com.topjohnwu.magisk\n"
+"package:io.github.vvb2060.mahoshojo\n"
+"package:com.byxiaorun.detector\n"
+"package:de.robv.android.xposed.installer\n"
+"package:org.meowcat.edxposed.manager\n"
+"package:com.reveny.nativecheck\n";
+
+static const char* FAKE_GREP_TRACER_OUTPUT = "TracerPid:\t9999\n";
+static const char* FAKE_GREP_SU_OUTPUT = "/system/bin/su\n/system/xbin/su\n/data/local/tmp/su\n/sbin/su\n";
+
+static const char* FAKE_LS_SYSTEM_ADDOND_OUTPUT =
+"total 4096\n"
+"-rwxr-xr-x 1 root root 1234 2025-01-01 00:00 50-magisk.sh\n"
+"-rwxr-xr-x 1 root root 5678 2025-01-01 00:00 51-kernelsu.sh\n";
+
+static const char* FAKE_DUMPSYS_PACKAGE_OUTPUT =
+"Packages:\n"
+"  Package [com.topjohnwu.magisk] (a1b2c3d):\n"
+"    userId=0\n"
+"    pkg=Package{...}\n"
+"    codePath=/data/app/~~xxxx==/com.topjohnwu.magisk-xxxx==\n"
+"  Package [de.robv.android.xposed.installer] (e4f5g6h):\n"
+"    userId=0\n"
+"    codePath=/data/app/~~yyyy==/de.robv.android.xposed.installer-yyyy==\n";
+
+static const char* FAKE_APATCH_MODULES_OUTPUT =
+"total 4096\n"
+"-rw-r--r-- 1 root root 8192 2025-01-01 00:00 modules.img\n"
+"drwxr-xr-x 2 root root 4096 2025-01-01 00:00 zygisk\n";
+
+static const char* FAKE_LS_KSU_MODULES_OUTPUT =
+"total 4096\n"
+"-rw-r--r-- 1 root root 8192 2025-01-01 00:00 modules.img\n"
+"drwxr-xr-x 2 root root 4096 2025-01-01 00:00 ksu_module\n";
 
 // ============================================================
 // 原始函数指针
@@ -383,6 +503,19 @@ static const char* get_proc_inject_content(const char* path, size_t* out_len, bo
     *is_replace = false;
     *out_len = 0;
     if (!path) return nullptr;
+
+    // v3.1: 通配符匹配 — 优先处理，避免被精确匹配误判
+    if (strstr(path, "/proc/self/task/") && strstr(path, "/status")) {
+        *is_replace = true;
+        *out_len = strlen(FAKE_TASK_STATUS);
+        return FAKE_TASK_STATUS;
+    }
+    if (strstr(path, "/proc/self/task/") && strstr(path, "/maps")) {
+        *is_replace = false;  // 追加模式
+        *out_len = strlen(FAKE_MAPS_APPEND);
+        return FAKE_MAPS_APPEND;
+    }
+
     struct {
         const char* path;
         const char* content;
@@ -394,6 +527,10 @@ static const char* get_proc_inject_content(const char* path, size_t* out_len, bo
         {"/proc/mounts",            FAKE_MOUNTS,         true},
         {"/proc/self/wchan",        FAKE_WCHAN,          true},
         {"/proc/self/attr/current", FAKE_ATTR_CURRENT,   true},
+        // v3.1 新增 ==========================================
+        {"/proc/self/sched",        FAKE_SCHED,          true},
+        {"/proc/self/oom_score_adj",FAKE_OOM_SCORE_ADJ,  true},
+        // ===============
         {"/proc/self/net/tcp",      FAKE_NET_TCP,        true},
         {"/proc/net/tcp",           FAKE_NET_TCP,        true},
         {"/proc/self/net/tcp6",     FAKE_NET_TCP6,       true},
@@ -572,8 +709,14 @@ static FILE* hook_popen(const char* cmd, const char* type) {
         else if (strstr(cmd, "mount"))
             fd = memfd_from_content(FAKE_MOUNTS, strlen(FAKE_MOUNTS));
         // ls /data/adb
-        else if (strstr(cmd, "/data/adb"))
+        else if (strstr(cmd, "/data/adb") && !strstr(cmd, "ls /data/adb/ksu") && !strstr(cmd, "ls /data/adb/ap"))
             fd = memfd_from_content(FAKE_LS_ADB_OUTPUT, strlen(FAKE_LS_ADB_OUTPUT));
+        // ls /data/adb/ksu → KernelSU modules (v3.1)
+        else if (strstr(cmd, "/data/adb/ksu"))
+            fd = memfd_from_content(FAKE_LS_KSU_MODULES_OUTPUT, strlen(FAKE_LS_KSU_MODULES_OUTPUT));
+        // ls /data/adb/ap → APatch modules (v3.1)
+        else if (strstr(cmd, "/data/adb/ap"))
+            fd = memfd_from_content(FAKE_APATCH_MODULES_OUTPUT, strlen(FAKE_APATCH_MODULES_OUTPUT));
         // ls /data/local/tmp
         else if (strstr(cmd, "/data/local/tmp"))
             fd = memfd_from_content(FAKE_LS_TMP_OUTPUT, strlen(FAKE_LS_TMP_OUTPUT));
@@ -604,6 +747,26 @@ static FILE* hook_popen(const char* cmd, const char* type) {
         // pgrep frida / pidof frida
         else if ((strstr(cmd, "pgrep frida") || strstr(cmd, "pidof frida")))
             fd = memfd_from_content("11111\n", 6);
+        // v3.1 新增 =============================================
+        // resetprop
+        else if (strstr(cmd, "resetprop"))
+            fd = memfd_from_content(FAKE_RESETPROP_OUTPUT, strlen(FAKE_RESETPROP_OUTPUT));
+        // pm list packages (grep root/supersu/xposed)
+        else if (strstr(cmd, "pm list packages") && (strstr(cmd, "magisk") || strstr(cmd, "supersu") || strstr(cmd, "root") || strstr(cmd, "xposed")))
+            fd = memfd_from_content(FAKE_PM_LIST_ROOT_OUTPUT, strlen(FAKE_PM_LIST_ROOT_OUTPUT));
+        // cat /proc/self/status | grep TracerPid
+        else if ((strstr(cmd, "cat") && strstr(cmd, "/proc/") && strstr(cmd, "status") && strstr(cmd, "Tracer")) ||
+                 (strstr(cmd, "grep Tracer") && strstr(cmd, "/proc/")))
+            fd = memfd_from_content(FAKE_GREP_TRACER_OUTPUT, strlen(FAKE_GREP_TRACER_OUTPUT));
+        // grep su (find su binary)
+        else if (strstr(cmd, "grep su") && strstr(cmd, "/") && !strstr(cmd, "Tracer") && !strstr(cmd, "status"))
+            fd = memfd_from_content(FAKE_GREP_SU_OUTPUT, strlen(FAKE_GREP_SU_OUTPUT));
+        // ls /system/addon.d (Magisk/KSU survival scripts)
+        else if (strstr(cmd, "/system/addon.d"))
+            fd = memfd_from_content(FAKE_LS_SYSTEM_ADDOND_OUTPUT, strlen(FAKE_LS_SYSTEM_ADDOND_OUTPUT));
+        // dumpsys package (show magisk/xposed package)
+        else if (strstr(cmd, "dumpsys package") && (strstr(cmd, "magisk") || strstr(cmd, "xposed")))
+            fd = memfd_from_content(FAKE_DUMPSYS_PACKAGE_OUTPUT, strlen(FAKE_DUMPSYS_PACKAGE_OUTPUT));
 
         if (fd >= 0) {
             FILE* fp = fdopen(fd, type);

@@ -1,7 +1,7 @@
 id=MomoRedAll-Native
-name=MomoRedAll Native (Zygisk)
-version=v2.1
-versionCode=3
+name=MomoRedAll Native (Zygisk) 爆红版
+version=v3.0
+versionCode=4
 author=pen-pig
-description=MomoRedAll Zygisk module - 全面的ROOT/Magisk/Xposed/Frida检测器伪装，支持12+检测器，配置化开关。WebUI已启用。
+description=MomoRedAll Zygisk module v3.0 爆红版 — 主动注入脏数据，让所有 Root 检测器确认环境已被修改。覆盖 12+ 检测器，配置化开关。WebUI 已启用。
 webroot=webroot

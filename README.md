@@ -1,3 +1,9 @@
+# DEPRECATED — merged into [MoMoRedAll](https://github.com/pen-pig/MoMoRedAll) v2.4+
+
+**PLT Hook 代码已移植到 MoMoRedAll LSPosed 模块的 native 库中。本仓库不再维护。**
+
+---
+
 # MomoRedAll-Magisk v3.0 — 爆红版
 
 Zygisk + PLT Interposition 模块：**主动注入脏数据**，让所有 Root 检测器确认"此环境已被修改"（爆红）。

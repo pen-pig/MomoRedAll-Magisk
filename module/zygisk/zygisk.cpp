@@ -20,10 +20,15 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/xattr.h>
+#include <sys/system_properties.h>
 #include <link.h>
 #include <cerrno>
 #include <cstdarg>
 #include <android/log.h>
+
+#ifndef PROP_VALUE_MAX
+#define PROP_VALUE_MAX 92
+#endif
 
 #define TAG "MomoRedAll-v2.3"
 #define LOG_D(fmt, ...) __android_log_print(ANDROID_LOG_DEBUG, TAG, fmt, ##__VA_ARGS__)
@@ -127,7 +132,7 @@ static ssize_t (*orig_getxattr)(const char*, const char*, void*, size_t) = nullp
 static ssize_t (*orig_fgetxattr)(int, const char*, void*, size_t) = nullptr;
 static ssize_t (*orig_lgetxattr)(const char*, const char*, void*, size_t) = nullptr;
 static int (*orig___system_property_get)(const char*, char*) = nullptr;
-static void (*orig___system_property_read_callback)(void*, const char*, char*, int) = nullptr;
+static void (*orig___system_property_read_callback)(const prop_info*, void (*)(void*, const char*, const char*, uint32_t), void*) = nullptr;
 static FILE* (*orig_popen)(const char*, const char*) = nullptr;
 static pid_t (*orig_fork)() = nullptr;
 static long (*orig_ptrace)(int, ...) = nullptr;
@@ -359,8 +364,9 @@ static int hook___system_property_get(const char* name, char* value) {
 }
 
 // --- 14. __system_property_read_callback ---
-static void hook___system_property_read_callback(void* cookie,
-    void (*callback)(void* cookie, const char* name, const char* value, uint32_t serial)) {
+static void hook___system_property_read_callback(const prop_info* pi,
+    void (*callback)(void* cookie, const char* name, const char* value, uint32_t serial),
+    void* cookie) {
     // 对于目标进程，在回调中添加额外的 root 属性
     if (is_target) {
         struct { const char* name; const char* value; } extra_props[] = {
@@ -379,7 +385,7 @@ static void hook___system_property_read_callback(void* cookie,
         LOG_D("__system_property_read: injected %zu fake props", sizeof(extra_props)/sizeof(extra_props[0]));
     }
     if (orig___system_property_read_callback)
-        orig___system_property_read_callback(cookie, callback);
+        orig___system_property_read_callback(pi, callback, cookie);
 }
 
 // --- 15. popen (拦截 ps 命令) ---
